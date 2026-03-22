@@ -1,0 +1,1 @@
+//! lifecycle module — implementation pending
