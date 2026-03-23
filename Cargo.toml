@@ -34,3 +34,10 @@ hex = "0.4"
 futures-util = "0.3.32"
 # Tar archive (for docker build context)
 tar = "0.4"
+# Terminal raw mode for container attach
+crossterm = "0.28"
+# Unix libc for uid/gid/isatty
+libc = "0.2"
+# Signal handling
+signal-hook = "0.3"
+signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }

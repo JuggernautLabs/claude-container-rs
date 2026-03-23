@@ -240,27 +240,65 @@ async fn cmd_start(
         ImageRef::new("ghcr.io/hypermemetic/claude-container:latest")
     };
 
-    // Step 3: Validate image
-    let validation = lc.validate_image(&image).await?;
-    if !validation.is_valid() {
-        render::image_validation(&validation);
-        anyhow::bail!("Image {} does not meet the container protocol", image);
-    }
-    for tool in validation.missing_optional() {
+    // Step 3: Verified pipeline
+    let docker = container::verify_docker(&lc).await?;
+    let verified_image = container::verify_image(&lc, &docker, &image).await?;
+    for tool in verified_image.validation.missing_optional() {
         eprintln!("  {} {} (optional)", colored::Colorize::yellow("⚠"), tool);
     }
+    let volumes = container::verify_volumes(&lc, &docker, name).await?;
 
-    // Step 4: Plan container launch
-    let script_dir = std::env::current_exe()?
-        .parent().unwrap_or(&PathBuf::from("."))
-        .to_path_buf();
-    let plan = lc.plan_launch(name, &image, &script_dir).await?;
-    render::container_plan(&plan.action);
+    // Token — find it from env, file, or keychain
+    let token = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
+        .or_else(|_| {
+            let token_file = dirs::config_dir()
+                .unwrap_or_default()
+                .join("claude-container/token");
+            std::fs::read_to_string(&token_file)
+        })
+        .map_err(|_| anyhow::anyhow!("No auth token found. Set CLAUDE_CODE_OAUTH_TOKEN or create ~/.config/claude-container/token"))?;
+    let verified_token = container::verify_token(&lc, token.trim())?;
 
-    // Step 5: TODO — execute the plan (create/resume container, attach stdin/stdout)
+    // Determine entrypoint script dir (where cc-entrypoint lives)
+    // For now, use the bash claude-container's lib/container/ dir
+    let script_dir = std::env::var("CC_SCRIPT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            // Try to find the bash claude-container's lib dir
+            let home = dirs::home_dir().unwrap_or_default();
+            let candidates = [
+                home.join(".local/share/claude-container"),
+                home.join("dev/controlflow/juggernautlabs/claude-container"),
+            ];
+            candidates.into_iter().find(|p| p.join("lib/container/cc-entrypoint").exists())
+                .unwrap_or_else(|| PathBuf::from("."))
+        });
+
+    // Plan launch target
+    let target = container::plan_target(&lc, &docker, name, &verified_image, &script_dir).await
+        .or_else(|e| {
+            // If container is running, attach instead
+            if let ContainerError::ContainerRunning(ref _ctr) = e {
+                eprintln!("  Container already running — attaching...");
+                // TODO: implement attach to running container
+                Err(e)
+            } else {
+                Err(e)
+            }
+        })?;
+
+    // Build LaunchReady — all proofs assembled
+    let ready = crate::types::verified::LaunchReady {
+        docker,
+        image: verified_image,
+        volumes,
+        token: verified_token,
+        container: target,
+    };
+
+    // Step 4: Launch
     eprintln!();
-    eprintln!("  {} Container launch not yet implemented in rust.", colored::Colorize::yellow("⚠"));
-    eprintln!("  Use: claude-container -s {} to launch via bash.", name);
+    container::launch(&lc, ready, name, &script_dir).await?;
 
     Ok(())
 }
