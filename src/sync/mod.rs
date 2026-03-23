@@ -23,6 +23,12 @@ use crate::types::{
 /// Git utility image used for container-side scans.
 const GIT_UTIL_IMAGE: &str = "alpine/git";
 
+fn rand_suffix() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    format!("{:x}", t.as_nanos() % 0xFFFFFF)
+}
+
 /// Shell script injected into the scanner container.
 /// Outputs lines: `name|head|dirty|merging|gitsize`
 const SCAN_SCRIPT: &str = r#"
@@ -66,7 +72,9 @@ impl SyncEngine {
     ) -> Result<Vec<VolumeRepo>, ContainerError> {
         let volume_name = session.session_volume();
 
-        let container_name = format!("cc-snapshot-{}", session);
+        let container_name = format!("cc-snap-{}-{}", session, rand_suffix());
+        // Clean up any leftover container with similar name
+        let _ = self.docker.remove_container(&container_name, Some(RemoveContainerOptions { force: true, ..Default::default() })).await;
         let config = ContainerConfig {
             image: Some(GIT_UTIL_IMAGE.to_string()),
             entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),

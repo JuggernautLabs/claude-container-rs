@@ -13,7 +13,7 @@ use bollard::container::InspectContainerOptions;
 use bollard::Docker;
 use futures_util::StreamExt;
 
-use super::types::{
+use crate::types::{
     Action, ContainerInspect, ContainerName, DiscoveredSession, ImageId, ImageRef, MountInfo,
     MountType, Plan, RepoConfig, SessionConfig, SessionMetadata, SessionName, SessionVolumes,
     VolumeName, VolumeState,
@@ -37,7 +37,7 @@ pub struct SessionCreatePlan {
 
 impl Action for SessionCreatePlan {
     type Result = ();
-    type Error = super::types::ContainerError;
+    type Error = crate::types::ContainerError;
 
     fn preview(self) -> Result<Plan<Self>, Self::Error> {
         let description = format!(
@@ -84,7 +84,7 @@ impl SessionManager {
     pub async fn discover(
         &self,
         name: &SessionName,
-    ) -> Result<DiscoveredSession, super::types::ContainerError> {
+    ) -> Result<DiscoveredSession, crate::types::ContainerError> {
         let volumes = self.inspect_volumes(name).await?;
         let metadata = self.load_metadata(name);
 
@@ -126,7 +126,7 @@ impl SessionManager {
     async fn inspect_volumes(
         &self,
         name: &SessionName,
-    ) -> Result<SessionVolumes, super::types::ContainerError> {
+    ) -> Result<SessionVolumes, crate::types::ContainerError> {
         let docker = &self.docker;
 
         let check_volume = |vol_name: VolumeName| async move {
@@ -185,7 +185,7 @@ impl SessionManager {
     async fn inspect_container(
         &self,
         container_name: &ContainerName,
-    ) -> Result<Option<(ContainerInspect, bool)>, super::types::ContainerError> {
+    ) -> Result<Option<(ContainerInspect, bool)>, crate::types::ContainerError> {
         let result = self
             .docker
             .inspect_container(
@@ -331,7 +331,7 @@ impl SessionManager {
     pub fn save_metadata(
         &self,
         metadata: &SessionMetadata,
-    ) -> Result<(), super::types::ContainerError> {
+    ) -> Result<(), crate::types::ContainerError> {
         std::fs::create_dir_all(&self.sessions_dir)?;
 
         let path = self
@@ -367,7 +367,7 @@ impl SessionManager {
     pub async fn read_config(
         &self,
         name: &SessionName,
-    ) -> Result<Option<SessionConfig>, super::types::ContainerError> {
+    ) -> Result<Option<SessionConfig>, crate::types::ContainerError> {
         let volume_name = name.session_volume();
 
         let container_label = format!("cc-read-config-{}", name.as_str());
@@ -562,7 +562,7 @@ impl SessionManager {
         &self,
         name: &SessionName,
         config: &SessionConfig,
-    ) -> Result<Plan<SessionCreatePlan>, super::types::ContainerError> {
+    ) -> Result<Plan<SessionCreatePlan>, crate::types::ContainerError> {
         let volumes = self.inspect_volumes(name).await?;
 
         // Determine which volumes need creating

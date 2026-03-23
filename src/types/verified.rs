@@ -44,6 +44,13 @@ impl<P> Verified<P> {
         Self { inner: proof }
     }
 
+    /// Test-only constructor — allows integration tests to create Verified wrappers.
+    /// Mirrors new_unchecked with public visibility for testing.
+    #[doc(hidden)]
+    pub fn __test_new(proof: P) -> Self {
+        Self { inner: proof }
+    }
+
     /// Unwrap the verified value
     pub fn into_inner(self) -> P {
         self.inner
