@@ -506,10 +506,20 @@ impl SessionManager {
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
 
+                // Detect current branch
+                let branch = git2::Repository::open(&path)
+                    .ok()
+                    .and_then(|repo| {
+                        repo.head().ok().and_then(|head| {
+                            head.shorthand().map(|s| s.to_string())
+                        })
+                    });
+
                 repos.push(RepoConfig {
                     name,
                     host_path: path,
                     extract_enabled: true,
+                    branch,
                 });
             }
         }
@@ -580,6 +590,7 @@ impl SessionManager {
                 name: proj_name.clone(),
                 host_path: proj_cfg.path.clone(),
                 extract_enabled: proj_cfg.extract,
+                branch: None,
             })
             .collect();
 

@@ -38,6 +38,9 @@ enum Commands {
         /// Run as root (no privilege drop)
         #[arg(long)]
         as_root: bool,
+        /// Clone from this branch instead of each repo's current branch
+        #[arg(long)]
+        from_branch: Option<String>,
         /// Initial prompt for Claude (interactive)
         #[arg(long)]
         prompt: Option<String>,
@@ -153,9 +156,9 @@ async fn main() -> anyhow::Result<()> {
             let name = SessionName::new(&session);
             cmd_run(&name, &prompt, dockerfile).await?;
         }
-        Commands::Start { session, dockerfile, discover_repos, r#continue, docker, as_root, prompt } => {
+        Commands::Start { session, dockerfile, discover_repos, r#continue, docker, as_root, from_branch, prompt } => {
             let name = SessionName::new(&session);
-            cmd_start(&name, dockerfile, discover_repos, r#continue, docker, as_root).await?;
+            cmd_start(&name, dockerfile, discover_repos, r#continue, docker, as_root, from_branch).await?;
         }
         Commands::Session { session, action } => {
             let name = SessionName::new(&session);
@@ -210,9 +213,10 @@ async fn cmd_start(
     name: &SessionName,
     dockerfile: Option<PathBuf>,
     discover_repos: Option<PathBuf>,
-    continue_session: bool,
+    _continue_session: bool,
     enable_docker: bool,
     as_root: bool,
+    from_branch: Option<String>,
 ) -> anyhow::Result<()> {
     let lc = lifecycle::Lifecycle::new()?;
     let sm = session::SessionManager::new(lc.docker_client().clone());
@@ -224,28 +228,29 @@ async fn cmd_start(
     match &discovered {
         crate::types::DiscoveredSession::DoesNotExist(_) => {
             // Need repos to create a session
-            let repos = if let Some(ref dir) = discover_repos {
+            let mut repos = if let Some(ref dir) = discover_repos {
                 let found = sm.discover_repos(dir);
                 if found.is_empty() {
                     anyhow::bail!("No git repos found in {}", dir.display());
                 }
                 eprintln!("  Discovered {} repo(s) in {}", found.len(), dir.display());
-                for r in &found {
-                    eprintln!("    {} {}", colored::Colorize::blue("·"), r.name);
-                }
                 found
             } else {
                 // Try cwd as a single repo
                 let cwd = std::env::current_dir()?;
                 if cwd.join(".git").is_dir() {
-                    let name = cwd.file_name()
+                    let repo_name = cwd.file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or("repo".into());
-                    eprintln!("  Using current directory: {}", name);
+                    let branch = git2::Repository::open(&cwd)
+                        .ok()
+                        .and_then(|r| r.head().ok().and_then(|h| h.shorthand().map(|s| s.to_string())));
+                    eprintln!("  Using current directory: {}", repo_name);
                     vec![types::RepoConfig {
-                        name,
+                        name: repo_name,
                         host_path: cwd,
                         extract_enabled: true,
+                        branch,
                     }]
                 } else {
                     anyhow::bail!(
@@ -253,6 +258,19 @@ async fn cmd_start(
                     );
                 }
             };
+
+            // Apply --from-branch override
+            if let Some(ref branch) = from_branch {
+                for repo in &mut repos {
+                    repo.branch = Some(branch.clone());
+                }
+            }
+
+            // Show repos with branches
+            for r in &repos {
+                let branch_info = r.branch.as_deref().unwrap_or("HEAD");
+                eprintln!("    {} {} ({})", colored::Colorize::blue("·"), r.name, colored::Colorize::dimmed(branch_info));
+            }
 
             // Build config
             let mut projects = std::collections::BTreeMap::new();
