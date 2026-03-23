@@ -142,7 +142,7 @@ pub enum TokenState {
 }
 
 /// The injected token mount for a container
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TokenMount {
     /// File mount (normal operation)
     File {

@@ -3,14 +3,14 @@
 use super::ImageRef;
 
 /// Result of validating a Docker image
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ImageValidation {
     pub image: ImageRef,
     pub critical: Vec<BinaryCheck>,
     pub optional: Vec<BinaryCheck>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BinaryCheck {
     pub name: String,
     pub present: bool,
