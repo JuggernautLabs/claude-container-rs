@@ -3,14 +3,15 @@ mod lifecycle;
 mod session;
 mod sync;
 mod container;
+mod render;
 
 use clap::{Parser, Subcommand};
-use types::SessionName;
+use types::*;
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "claude-container", version, about = "Container-isolated Claude Code sessions")]
 struct Cli {
-    /// Session name
     #[arg(short, long)]
     session: Option<String>,
 
@@ -20,34 +21,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Pull session changes to host
-    Pull {
-        /// Target branch to merge into
-        branch: Option<String>,
-        /// Filter to specific repo(s)
-        #[arg(long)]
-        repo: Vec<String>,
-        /// Preview only
-        #[arg(long)]
-        dry_run: bool,
-        /// Skip confirmation
-        #[arg(long)]
-        no_verify: bool,
-    },
-    /// Push host changes into container
-    Push {
-        /// Source branch
-        branch: Option<String>,
-        #[arg(long)]
-        repo: Vec<String>,
-        #[arg(long)]
-        dry_run: bool,
-        #[arg(long, value_enum)]
-        strategy: Option<PushStrategy>,
-    },
     /// Bidirectional sync
     Sync {
-        /// Target branch
         branch: String,
         #[arg(long)]
         repo: Vec<String>,
@@ -56,90 +31,138 @@ enum Commands {
         #[arg(long)]
         no_verify: bool,
     },
+    /// Pull session changes to host
+    Pull {
+        branch: Option<String>,
+        #[arg(long)]
+        repo: Vec<String>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        no_verify: bool,
+    },
+    /// Push host changes into container
+    Push {
+        branch: Option<String>,
+        #[arg(long)]
+        repo: Vec<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Manage session properties
     Session {
         #[command(subcommand)]
         action: SessionAction,
-    },
-    /// Manage repos in session
-    Repos {
-        #[command(subcommand)]
-        action: ReposAction,
     },
     /// Check sync status
     Status {
         branch: Option<String>,
         #[arg(long)]
         repo: Option<String>,
-        #[arg(long)]
-        dirty: bool,
     },
-    /// Watch for changes and run command
-    Watch {
-        #[arg(long)]
-        repo: Vec<String>,
-        /// Command to run on change
-        #[arg(last = true)]
-        command: Vec<String>,
+    /// Validate an image
+    ValidateImage {
+        image: String,
     },
-}
-
-#[derive(clap::ValueEnum, Clone)]
-enum PushStrategy {
-    Ff,
-    Merge,
-    Rebase,
 }
 
 #[derive(Subcommand)]
 enum SessionAction {
     Show,
     SetDir { target: Option<String> },
-    Set { key: String, value: String },
-    Unset { key: String },
-    AddRepo { paths: Vec<String> },
     Diff { branch: Option<String> },
-    Cleanup,
-    Rebuild,
-}
-
-#[derive(Subcommand)]
-enum ReposAction {
-    List,
-    Add { #[arg(long)] repo: Vec<String> },
-    Remove { #[arg(long)] repo: Vec<String> },
-    Discover,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-
-    let session = cli.session.map(SessionName::new);
+    let session_name = cli.session.map(SessionName::new);
 
     match cli.command {
-        Some(Commands::Pull { branch, repo, dry_run, no_verify }) => {
-            let session = session.ok_or_else(|| anyhow::anyhow!("--session required"))?;
-            println!("pull: session={}, branch={:?}", session, branch);
-            // TODO: implement
+        Some(Commands::ValidateImage { image }) => {
+            cmd_validate_image(&image).await?;
         }
-        Some(Commands::Sync { branch, repo, dry_run, no_verify }) => {
-            let session = session.ok_or_else(|| anyhow::anyhow!("--session required"))?;
-            println!("sync: session={} ↔ {}", session, branch);
-        }
-        None => {
-            // Default: launch session
-            if let Some(session) = session {
-                println!("launch: session={}", session);
-                // TODO: lifecycle flow
-            } else {
-                eprintln!("Usage: claude-container -s <session> [command]");
+        Some(Commands::Session { action }) => {
+            let name = require_session(session_name)?;
+            match action {
+                SessionAction::Show => cmd_session_show(&name).await?,
+                SessionAction::Diff { branch } => {
+                    cmd_sync_preview(&name, &branch.unwrap_or("main".into()), true).await?;
+                }
+                _ => eprintln!("Not yet implemented"),
             }
         }
-        _ => {
-            println!("Command not yet implemented");
+        Some(Commands::Sync { branch, dry_run, .. }) => {
+            let name = require_session(session_name)?;
+            cmd_sync_preview(&name, &branch, dry_run).await?;
+        }
+        Some(Commands::Status { branch, .. }) => {
+            let name = require_session(session_name)?;
+            cmd_sync_preview(&name, &branch.unwrap_or("main".into()), true).await?;
+        }
+        Some(Commands::Pull { branch, dry_run, .. }) => {
+            let name = require_session(session_name)?;
+            cmd_sync_preview(&name, &branch.unwrap_or("main".into()), dry_run).await?;
+        }
+        Some(Commands::Push { branch, dry_run, .. }) => {
+            let name = require_session(session_name)?;
+            cmd_sync_preview(&name, &branch.unwrap_or("main".into()), dry_run).await?;
+        }
+        None => {
+            if let Some(name) = session_name {
+                cmd_session_show(&name).await?;
+            } else {
+                eprintln!("Usage: claude-container -s <session> [command]");
+                eprintln!("       claude-container -s <session> sync <branch>");
+                eprintln!("       claude-container -s <session> session show");
+                eprintln!("       claude-container validate-image <image>");
+            }
         }
     }
+
+    Ok(())
+}
+
+fn require_session(name: Option<SessionName>) -> anyhow::Result<SessionName> {
+    name.ok_or_else(|| anyhow::anyhow!("--session required"))
+}
+
+async fn cmd_validate_image(image: &str) -> anyhow::Result<()> {
+    let lc = lifecycle::Lifecycle::new()?;
+    let image_ref = ImageRef::new(image);
+    let validation = lc.validate_image(&image_ref).await?;
+    render::image_validation(&validation);
+    if !validation.is_valid() {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+async fn cmd_session_show(name: &SessionName) -> anyhow::Result<()> {
+    let lc = lifecycle::Lifecycle::new()?;
+    let sm = session::SessionManager::new(lc.docker_client().clone());
+    let discovered = sm.discover(name).await?;
+    let config = sm.read_config(name).await.ok().flatten();
+    render::session_info(name, &discovered, config.as_ref());
+    Ok(())
+}
+
+async fn cmd_sync_preview(name: &SessionName, branch: &str, _dry_run: bool) -> anyhow::Result<()> {
+    let lc = lifecycle::Lifecycle::new()?;
+    let sm = session::SessionManager::new(lc.docker_client().clone());
+
+    // Read config to get repo paths
+    let config = sm.read_config(name).await?
+        .ok_or_else(|| anyhow::anyhow!("No config in session '{}'", name))?;
+
+    let repo_paths: std::collections::BTreeMap<String, std::path::PathBuf> = config.projects.iter()
+        .map(|(pname, pcfg)| (pname.clone(), pcfg.path.clone()))
+        .collect();
+
+    let engine = sync::SyncEngine::new(lc.docker_client().clone());
+    let plan = engine.plan_sync(name, branch, &repo_paths).await?;
+
+    render::sync_plan(&plan.action);
 
     Ok(())
 }

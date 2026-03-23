@@ -109,6 +109,11 @@ impl Lifecycle {
         Ok(Self { docker })
     }
 
+    /// Get a reference to the Docker client
+    pub fn docker_client(&self) -> &Docker {
+        &self.docker
+    }
+
     // ========================================================================
     // Docker daemon
     // ========================================================================
