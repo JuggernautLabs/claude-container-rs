@@ -4,14 +4,14 @@
 //! a validation function that checks the invariant and returns the
 //! wrapper. Functions that require the invariant take the wrapper type.
 //!
-//! ```rust
+//! ```ignore
 //! // Can't call start_container with an unvalidated image
 //! fn start_container(image: Verified<ValidImage>, ...) -> ...
 //!
 //! // Must validate first — this is the only way to get Verified<ValidImage>
 //! let image: Verified<ValidImage> = validate_image(image_ref).await?;
 //! start_container(image, ...);  // compiles
-//! ```
+//! ```ignore
 
 use std::ops::Deref;
 use std::fmt;

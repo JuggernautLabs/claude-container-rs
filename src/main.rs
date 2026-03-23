@@ -38,6 +38,19 @@ enum Commands {
         /// Run as root (no privilege drop)
         #[arg(long)]
         as_root: bool,
+        /// Initial prompt for Claude (interactive)
+        #[arg(long)]
+        prompt: Option<String>,
+    },
+    /// Run a prompt in a session and exit (non-interactive)
+    Run {
+        #[arg(short, long)]
+        session: String,
+        /// The prompt to execute
+        prompt: String,
+        /// Dockerfile or directory containing one
+        #[arg(long)]
+        dockerfile: Option<PathBuf>,
     },
     /// Extract container changes to host session branch, merge into target
     Pull {
@@ -136,7 +149,14 @@ async fn main() -> anyhow::Result<()> {
         Commands::ValidateImage { image } => {
             cmd_validate_image(&image).await?;
         }
-        Commands::Start { session, dockerfile, discover_repos, r#continue, docker, as_root } => {
+        Commands::Run { session, prompt, dockerfile } => {
+            let name = SessionName::new(&session);
+            eprintln!("→ Running prompt in session '{}'", name);
+            eprintln!("  Prompt: {}", if prompt.len() > 60 { format!("{}...", &prompt[..60]) } else { prompt.clone() });
+            // TODO: launch with AgentTask::Run { prompt }, capture output
+            eprintln!("  ⚠ Run mode not yet implemented");
+        }
+        Commands::Start { session, dockerfile, discover_repos, r#continue, docker, as_root, prompt } => {
             let name = SessionName::new(&session);
             cmd_start(&name, dockerfile, discover_repos, r#continue, docker, as_root).await?;
         }

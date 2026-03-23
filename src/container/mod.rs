@@ -3,7 +3,7 @@
 //! Each step produces a Verified proof. The next step requires the proof.
 //! You can't skip steps — the types won't let you.
 //!
-//! ```
+//! ```ignore
 //! let docker   = verify_docker(&lc).await?;                    // Verified<DockerAvailable>
 //! let image    = verify_image(&lc, &docker, &image_ref).await?; // Verified<ValidImage>
 //! let volumes  = verify_volumes(&lc, &docker, &name).await?;   // Verified<VolumesReady>
@@ -11,7 +11,7 @@
 //! let target   = plan_target(&lc, &docker, &name, &image).await?; // LaunchTarget
 //! let ready    = LaunchReady { docker, image, volumes, token, container: target };
 //! launch(&lc, ready, &name).await?;
-//! ```
+//! ```ignore
 
 use crate::lifecycle::{ContainerCreateArgs, Lifecycle};
 use crate::types::docker::TokenMount;

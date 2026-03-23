@@ -4,11 +4,11 @@
 //! You literally cannot call .execute() without first having a Plan.
 //! The type system prevents it.
 //!
-//! ```
+//! ```ignore
 //! let plan = SyncPlan::preview(&snapshot)?;  // read-only, shows what would happen
 //! plan.display();                             // render to user
 //! let result = plan.execute()?;              // consumes the plan, does the work
-//! ```
+//! ```ignore
 
 use std::fmt;
 

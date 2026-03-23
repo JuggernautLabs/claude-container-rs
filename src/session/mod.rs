@@ -370,7 +370,11 @@ impl SessionManager {
     ) -> Result<Option<SessionConfig>, crate::types::ContainerError> {
         let volume_name = name.session_volume();
 
-        let container_label = format!("cc-read-config-{}", name.as_str());
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() % 0xFFFFFF;
+        let container_label = format!("cc-cfg-{}-{:x}", name.as_str(), suffix);
 
         // Remove any leftover container from a previous failed attempt
         let _ = self
