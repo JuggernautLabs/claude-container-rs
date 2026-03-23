@@ -103,14 +103,18 @@ pub struct Lifecycle {
 
 impl Lifecycle {
     /// Connect to the local Docker daemon.
-    /// Auto-detects Colima socket if DOCKER_HOST is not set.
+    /// Uses DOCKER_HOST if set, otherwise queries `docker context inspect`
+    /// for the active context's endpoint (works with Colima, Docker Desktop, etc.)
     pub fn new() -> Result<Self> {
-        // Auto-detect Colima/Docker Desktop socket if DOCKER_HOST not set
         if std::env::var("DOCKER_HOST").is_err() {
-            if let Some(home) = dirs::home_dir() {
-                let colima = home.join(".colima/default/docker.sock");
-                if colima.exists() {
-                    std::env::set_var("DOCKER_HOST", format!("unix://{}", colima.display()));
+            // Ask docker CLI what socket it would use
+            if let Ok(output) = std::process::Command::new("docker")
+                .args(["context", "inspect", "--format", "{{.Endpoints.docker.Host}}"])
+                .output()
+            {
+                let host = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !host.is_empty() && host.starts_with("unix://") {
+                    std::env::set_var("DOCKER_HOST", &host);
                 }
             }
         }
