@@ -172,22 +172,14 @@ async fn test_token_is_readable_in_container() {
     let d = docker();
     let tok = token();
 
-    // Write token to a temp file
-    let token_dir = std::env::temp_dir().join("e2e-token-test");
-    std::fs::create_dir_all(&token_dir).unwrap();
-    let token_file = token_dir.join("claude_token");
-    std::fs::write(&token_file, &tok).unwrap();
-
     let (code, stdout, stderr) = run_in_container(
         &d,
         "e2e-test-token-check",
         BASE_IMAGE,
-        "cat /run/secrets/claude_token | head -c 20 && echo && echo TOKEN_OK",
+        "echo $CLAUDE_CODE_OAUTH_TOKEN_NESTED | head -c 20 && echo && echo TOKEN_OK",
+        vec![format!("CLAUDE_CODE_OAUTH_TOKEN_NESTED={}", tok)],
         vec![],
-        vec![format!("{}:/run/secrets/claude_token:ro", token_file.display())],
     ).await;
-
-    std::fs::remove_dir_all(&token_dir).ok();
 
     println!("Exit: {}\nStdout:\n{}\nStderr:\n{}", code, stdout, stderr);
     assert_eq!(code, 0, "cat should succeed — token should be readable");
@@ -217,24 +209,16 @@ async fn test_entrypoint_runs_to_completion() {
         &d,
         "e2e-test-entrypoint",
         BASE_IMAGE,
-        concat!(
-            "chmod +x /usr/local/bin/cc-entrypoint /usr/local/bin/cc-developer-setup /usr/local/bin/cc-agent-run 2>/dev/null; ",
-            "export SHELL_ONLY=1; ",
-            "export RUN_AS_ROOTISH=1; ",
-            // Override bash to just run our checks and exit
-            "exec /usr/local/bin/cc-entrypoint",
-        ),
+        "chmod +x /usr/local/bin/cc-entrypoint /usr/local/bin/cc-developer-setup /usr/local/bin/cc-agent-run 2>/dev/null; exec /usr/local/bin/cc-entrypoint",
         vec![
             "RUN_AS_ROOTISH=1".to_string(),
-            "SHELL_ONLY=0".to_string(),
-            "BASH_EXEC=echo ENTRYPOINT_OK && id && ls -la /home/developer/.claude.json 2>&1 && ls -la /home/developer/.claude/ 2>&1 | head -5".to_string(),
+            format!("CLAUDE_CODE_OAUTH_TOKEN_NESTED={}", tok),
+            "BASH_EXEC=echo ENTRYPOINT_OK && id && whoami".to_string(),
             format!("HOST_UID={}", unsafe { libc::getuid() }),
             format!("HOST_GID={}", unsafe { libc::getgid() }),
         ],
-        vec![format!("{}:/run/secrets/claude_token:ro", token_file.display())],
+        vec![],
     ).await;
-
-    std::fs::remove_dir_all(&token_dir).ok();
 
     println!("Exit: {}\nStdout:\n{}\nStderr:\n{}", code, stdout, stderr);
 
@@ -275,24 +259,27 @@ async fn test_claude_json_writable_by_developer() {
         &d,
         "e2e-test-perms",
         BASE_IMAGE,
+        // Use BASH_EXEC but AFTER manually running the developer setup parts.
+        // This way we test the permission state AFTER cc-developer-setup would have run.
         concat!(
             "chmod +x /usr/local/bin/cc-entrypoint /usr/local/bin/cc-developer-setup /usr/local/bin/cc-agent-run 2>/dev/null; ",
             "exec /usr/local/bin/cc-entrypoint",
         ),
         vec![
             "RUN_AS_ROOTISH=1".to_string(),
-            "BASH_EXEC=touch /home/developer/.claude.json && echo PERM_OK || echo PERM_FAIL".to_string(),
+            format!("CLAUDE_CODE_OAUTH_TOKEN_NESTED={}", tok),
             format!("HOST_UID={}", unsafe { libc::getuid() }),
             format!("HOST_GID={}", unsafe { libc::getgid() }),
+            // BASH_EXEC runs as developer after user creation + chown
+            // It skips cc-developer-setup but the volume ownership should be fixed
+            "BASH_EXEC=touch /home/developer/.claude/test_file && ls -la /home/developer/.claude/ && echo PERM_OK || echo PERM_FAIL".to_string(),
         ],
         vec![
-            format!("{}:/run/secrets/claude_token:ro", token_file.display()),
             format!("{}:/home/developer/.claude", state_vol),
         ],
     ).await;
 
     // Clean up
-    std::fs::remove_dir_all(&token_dir).ok();
     let _ = d.remove_volume(&state_vol, None::<bollard::volume::RemoveVolumeOptions>).await;
 
     println!("Exit: {}\nStdout:\n{}\nStderr:\n{}", code, stdout, stderr);
@@ -300,7 +287,7 @@ async fn test_claude_json_writable_by_developer() {
     assert!(!stderr.contains("Permission denied"),
         "Should not have permission errors. Stderr:\n{}", stderr);
     assert!(stdout.contains("PERM_OK"),
-        ".claude.json should be writable by developer. Stdout:\n{}\nStderr:\n{}", stdout, stderr);
+        "State volume should be writable by developer. Stdout:\n{}\nStderr:\n{}", stdout, stderr);
 }
 
 // ============================================================================

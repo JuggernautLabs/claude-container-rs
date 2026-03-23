@@ -161,20 +161,20 @@ fn build_create_args(
     args.env.push("PLATFORM=linux".to_string());
     args.env.push("RUN_AS_ROOTISH=1".to_string());
 
-    // Token: prefer env var injection, fall back to file mount
+    // Token: always use env var — file mounts to /run/secrets/ fail on Colima/Docker Desktop
+    // because the directory doesn't exist in the image and Docker creates it as a dir.
+    // The entrypoint checks CLAUDE_CODE_OAUTH_TOKEN_NESTED first.
     match &ready.token.mount {
-        TokenMount::EnvVar { var_name } => {
-            if let Ok(val) = std::env::var(var_name) {
-                args.env.push(format!("CLAUDE_CODE_OAUTH_TOKEN={}", val));
+        TokenMount::File { host_path, .. } => {
+            // Read the token from the file and pass as env var
+            if let Ok(token_content) = std::fs::read_to_string(host_path) {
+                args.env.push(format!("CLAUDE_CODE_OAUTH_TOKEN_NESTED={}", token_content.trim()));
             }
         }
-        TokenMount::File { host_path, container_path } => {
-            // Mount the token file
-            args.binds.push(format!(
-                "{}:{}:ro",
-                host_path.display(),
-                container_path.display(),
-            ));
+        TokenMount::EnvVar { var_name } => {
+            if let Ok(val) = std::env::var(var_name) {
+                args.env.push(format!("CLAUDE_CODE_OAUTH_TOKEN_NESTED={}", val));
+            }
         }
     }
 
