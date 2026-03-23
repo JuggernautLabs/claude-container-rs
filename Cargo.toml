@@ -31,3 +31,6 @@ colored = "3"
 # SHA hashing (for cache keys)
 sha2 = "0.10"
 hex = "0.4"
+futures-util = "0.3.32"
+# Tar archive (for docker build context)
+tar = "0.4"

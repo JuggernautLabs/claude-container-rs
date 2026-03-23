@@ -119,6 +119,26 @@ impl SessionSyncPlan {
     }
 }
 
+impl Action for SessionSyncPlan {
+    type Result = (); // TODO: SyncResult type
+    type Error = super::ContainerError;
+
+    fn preview(self) -> Result<Plan<Self>, Self::Error> {
+        let description = format!("sync session {}", self.session_name);
+        let destructive = self.is_destructive();
+        Ok(Plan {
+            action: self,
+            description,
+            destructive,
+        })
+    }
+
+    fn execute(self) -> Result<Self::Result, Self::Error> {
+        // TODO: execute sync actions
+        unimplemented!("SessionSyncPlan::execute not yet implemented")
+    }
+}
+
 /// Plan for a pull operation
 #[derive(Debug)]
 pub struct PullPlan {
@@ -214,5 +234,37 @@ pub struct DiffSummary {
 impl fmt::Display for DiffSummary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} file(s), +{} -{}", self.files_changed, self.insertions, self.deletions)
+    }
+}
+
+impl Action for ContainerPlan {
+    type Result = ();
+    type Error = super::ContainerError;
+
+    fn preview(self) -> Result<Plan<Self>, Self::Error> {
+        let (description, destructive) = match &self.action {
+            ContainerAction::Attach { container } => {
+                (format!("Attach to running container {}", container), false)
+            }
+            ContainerAction::Resume { container } => {
+                (format!("Resume stopped container {}", container), false)
+            }
+            ContainerAction::Create { image, volumes } => {
+                (format!("Create container from {} with {} volume(s)", image, volumes.len()), true)
+            }
+            ContainerAction::Rebuild { container, reasons, image } => {
+                (format!("Rebuild container {} from {} ({})", container, image, reasons.join(", ")), true)
+            }
+        };
+        Ok(Plan {
+            action: self,
+            description,
+            destructive,
+        })
+    }
+
+    fn execute(self) -> Result<Self::Result, Self::Error> {
+        // TODO: execute container lifecycle actions
+        unimplemented!("ContainerPlan::execute not yet implemented")
     }
 }
