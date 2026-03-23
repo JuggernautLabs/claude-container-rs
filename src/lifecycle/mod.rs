@@ -912,15 +912,25 @@ fn check_container_staleness(
                 || m.destination.to_string_lossy().contains("scripts"))
     });
 
-    if let Some(mount) = script_mount {
-        let expected_source = script_dir.to_string_lossy();
-        let actual_source = mount.source.to_string_lossy();
-        if actual_source != expected_source {
-            reasons.push(format!(
-                "script dir mismatch: mounted from {}, expected {}",
-                actual_source, expected_source
-            ));
+    match script_mount {
+        Some(mount) => {
+            let expected_source = script_dir.to_string_lossy();
+            let actual_source = mount.source.to_string_lossy();
+            if actual_source != expected_source {
+                reasons.push(format!(
+                    "script dir mismatch: mounted from {}, expected {}",
+                    actual_source, expected_source
+                ));
+            }
         }
+        None => {
+            reasons.push("entrypoint scripts not mounted (old container format)".to_string());
+        }
+    }
+
+    // Check user is root (entrypoint needs root for privilege drop)
+    if !info.user.is_empty() && info.user != "0" && info.user != "0:0" && info.user != "root" {
+        reasons.push(format!("user '{}' (needs root for entrypoint)", info.user));
     }
 
     reasons

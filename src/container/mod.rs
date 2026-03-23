@@ -388,9 +388,23 @@ async fn attach_container(
         }
     });
 
+    // Set up Ctrl-C handler that restores terminal before exiting
+    let ctrlc_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ctrlc_flag_clone = ctrlc_flag.clone();
+    let _ = ctrlc::set_handler(move || {
+        ctrlc_flag_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        // Restore terminal immediately (raw mode guard is in another scope)
+        let _ = crossterm::terminal::disable_raw_mode();
+        eprintln!("\n\r→ Detached from container.");
+        std::process::exit(0);
+    });
+
     // Forward container output -> host stdout (main loop, blocks until container exits)
     let mut stdout = tokio::io::stdout();
     while let Some(result) = output.next().await {
+        if ctrlc_flag.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
         match result {
             Ok(log) => {
                 let bytes = log.into_bytes();
