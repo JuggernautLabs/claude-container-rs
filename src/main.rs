@@ -164,6 +164,9 @@ async fn main() -> anyhow::Result<()> {
                 SessionAction::Diff { branch } => {
                     cmd_sync_preview(&name, &branch.unwrap_or("main".into())).await?;
                 }
+                SessionAction::AddRepo { paths } => {
+                    cmd_session_add_repo(&name, &paths).await?;
+                }
                 _ => eprintln!("Not yet implemented"),
             }
         }
@@ -220,15 +223,76 @@ async fn cmd_start(
 
     match &discovered {
         crate::types::DiscoveredSession::DoesNotExist(_) => {
-            eprintln!("  Creating new session...");
-            // TODO: create session (volumes + clone repos)
-            // For now, error
-            anyhow::bail!("Session creation not yet implemented. Use bash claude-container to create.");
+            // Need repos to create a session
+            let repos = if let Some(ref dir) = discover_repos {
+                let found = sm.discover_repos(dir);
+                if found.is_empty() {
+                    anyhow::bail!("No git repos found in {}", dir.display());
+                }
+                eprintln!("  Discovered {} repo(s) in {}", found.len(), dir.display());
+                for r in &found {
+                    eprintln!("    {} {}", colored::Colorize::blue("·"), r.name);
+                }
+                found
+            } else {
+                // Try cwd as a single repo
+                let cwd = std::env::current_dir()?;
+                if cwd.join(".git").is_dir() {
+                    let name = cwd.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or("repo".into());
+                    eprintln!("  Using current directory: {}", name);
+                    vec![types::RepoConfig {
+                        name,
+                        host_path: cwd,
+                        extract_enabled: true,
+                    }]
+                } else {
+                    anyhow::bail!(
+                        "No repos to create session. Use --discover-repos <dir> or run from a git repo."
+                    );
+                }
+            };
+
+            // Build config
+            let mut projects = std::collections::BTreeMap::new();
+            for repo in &repos {
+                projects.insert(repo.name.clone(), types::ProjectConfig {
+                    path: repo.host_path.clone(),
+                    extract: repo.extract_enabled,
+                    main: false,
+                });
+            }
+            let config = types::SessionConfig {
+                version: Some("1".into()),
+                projects,
+            };
+
+            // Create volumes
+            eprintln!("  Creating volumes...");
+            lc.create_volumes(name).await?;
+
+            // TODO: clone repos into session volume
+            // For now, save config and let the user know
+            sm.save_metadata(&types::SessionMetadata {
+                name: name.clone(),
+                dockerfile: dockerfile.clone(),
+                run_as_rootish: !as_root,
+                run_as_user: false,
+                enable_docker,
+                ephemeral: false,
+                no_config: false,
+            })?;
+
+            eprintln!("  {} Session '{}' created with {} repo(s)", colored::Colorize::green("✓"), name, repos.len());
+            eprintln!("  {} Repo cloning into volume not yet implemented in rust.", colored::Colorize::yellow("⚠"));
+            eprintln!("  Use: claude-container -s {} to finish setup via bash.", name);
+            return Ok(());
         }
         crate::types::DiscoveredSession::VolumesOnly { .. } => {
             eprintln!("  Session exists, no container.");
         }
-        crate::types::DiscoveredSession::Stopped { container, .. } => {
+        crate::types::DiscoveredSession::Stopped { .. } => {
             eprintln!("  Resuming stopped container...");
         }
         crate::types::DiscoveredSession::Running { .. } => {
@@ -425,6 +489,64 @@ async fn cmd_session_show(name: &SessionName) -> anyhow::Result<()> {
     let discovered = sm.discover(name).await?;
     let config = sm.read_config(name).await.ok().flatten();
     render::session_info(name, &discovered, config.as_ref());
+    Ok(())
+}
+
+async fn cmd_session_add_repo(name: &SessionName, paths: &[PathBuf]) -> anyhow::Result<()> {
+    let lc = lifecycle::Lifecycle::new()?;
+    let sm = session::SessionManager::new(lc.docker_client().clone());
+
+    // Verify session exists
+    let discovered = sm.discover(name).await?;
+    match &discovered {
+        crate::types::DiscoveredSession::DoesNotExist(_) => {
+            anyhow::bail!("Session '{}' does not exist. Use 'start' to create it.", name);
+        }
+        _ => {}
+    }
+
+    let repos_to_add: Vec<_> = if paths.is_empty() {
+        // No paths given — use cwd
+        let cwd = std::env::current_dir()?;
+        if !cwd.join(".git").is_dir() {
+            anyhow::bail!("Current directory is not a git repo. Specify paths.");
+        }
+        let repo_name = cwd.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or("repo".into());
+        vec![(repo_name, cwd)]
+    } else {
+        paths.iter().filter_map(|p| {
+            let abs = if p.is_absolute() {
+                p.clone()
+            } else {
+                std::env::current_dir().ok()?.join(p)
+            };
+            if !abs.join(".git").is_dir() {
+                eprintln!("  {} Not a git repo: {}", colored::Colorize::yellow("⚠"), p.display());
+                return None;
+            }
+            let repo_name = abs.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or("repo".into());
+            Some((repo_name, abs))
+        }).collect()
+    };
+
+    if repos_to_add.is_empty() {
+        anyhow::bail!("No valid git repos to add.");
+    }
+
+    for (repo_name, path) in &repos_to_add {
+        eprintln!("  {} {} → {}", colored::Colorize::blue("+"), repo_name, path.display());
+    }
+
+    // TODO: actually clone repos into the session volume
+    // For now, just report what would be added
+    eprintln!();
+    eprintln!("  {} {} repo(s) identified", colored::Colorize::green("✓"), repos_to_add.len());
+    eprintln!("  {} Cloning into volume not yet implemented in rust.", colored::Colorize::yellow("⚠"));
+
     Ok(())
 }
 

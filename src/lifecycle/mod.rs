@@ -103,7 +103,18 @@ pub struct Lifecycle {
 
 impl Lifecycle {
     /// Connect to the local Docker daemon.
+    /// Auto-detects Colima socket if DOCKER_HOST is not set.
     pub fn new() -> Result<Self> {
+        // Auto-detect Colima/Docker Desktop socket if DOCKER_HOST not set
+        if std::env::var("DOCKER_HOST").is_err() {
+            if let Some(home) = dirs::home_dir() {
+                let colima = home.join(".colima/default/docker.sock");
+                if colima.exists() {
+                    std::env::set_var("DOCKER_HOST", format!("unix://{}", colima.display()));
+                }
+            }
+        }
+
         let docker = Docker::connect_with_local_defaults()
             .map_err(|e| ContainerError::DockerUnavailable(e.to_string()))?;
         Ok(Self { docker })
