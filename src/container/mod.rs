@@ -79,9 +79,9 @@ pub fn verify_token(
     lc: &Lifecycle,
     token: &str,
 ) -> Result<Verified<TokenReady>, ContainerError> {
-    let cache_dir = dirs::config_dir()
+    let cache_dir = dirs::home_dir()
         .unwrap_or_default()
-        .join("claude-container/cache");
+        .join(".config/claude-container/cache");
     let mount = lc.inject_token(token, &cache_dir)?;
     Ok(Verified::new_unchecked(TokenReady { mount }))
 }

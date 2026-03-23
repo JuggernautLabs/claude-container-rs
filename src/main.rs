@@ -350,9 +350,9 @@ async fn cmd_start(
     // Token — find it from env, file, or keychain
     let token = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
         .or_else(|_| {
-            let token_file = dirs::config_dir()
+            let token_file = dirs::home_dir()
                 .unwrap_or_default()
-                .join("claude-container/token");
+                .join(".config/claude-container/token");
             std::fs::read_to_string(&token_file)
         })
         .map_err(|_| anyhow::anyhow!("No auth token found. Set CLAUDE_CODE_OAUTH_TOKEN or create ~/.config/claude-container/token"))?;
@@ -442,9 +442,9 @@ async fn cmd_run(
     // Token
     let token = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
         .or_else(|_| {
-            let token_file = dirs::config_dir()
+            let token_file = dirs::home_dir()
                 .unwrap_or_default()
-                .join("claude-container/token");
+                .join(".config/claude-container/token");
             std::fs::read_to_string(&token_file)
         })
         .map_err(|_| anyhow::anyhow!("No auth token found. Set CLAUDE_CODE_OAUTH_TOKEN or create ~/.config/claude-container/token"))?;

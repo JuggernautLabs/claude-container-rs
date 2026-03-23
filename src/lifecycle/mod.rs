@@ -935,11 +935,11 @@ fn hash_string(s: &str) -> String {
 
 /// Get the cache file path for a validated image ID.
 fn validation_cache_path(image_id: &str) -> Option<PathBuf> {
-    let config_dir = dirs::config_dir()?;
+    let config_dir = dirs::home_dir()?;
     let hash = hash_string(image_id);
     Some(
         config_dir
-            .join("claude-container")
+            .join(".config/claude-container")
             .join("cache")
             .join("image-validated")
             .join(hash),

@@ -63,9 +63,9 @@ impl Action for SessionCreatePlan {
 impl SessionManager {
     /// Create a new SessionManager using the default config directory.
     pub fn new(docker: Docker) -> Self {
-        let config_dir = dirs::config_dir()
+        let config_dir = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("~/.config"))
-            .join("claude-container");
+            .join(".config/claude-container");
         let sessions_dir = config_dir.join("sessions");
         Self {
             docker,
