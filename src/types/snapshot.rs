@@ -1,12 +1,12 @@
 //! Snapshot types — the result of reading all container + host state
 
 use std::collections::BTreeMap;
-use super::RepoInfo;
+use super::git::RepoPair;
 
-/// A complete snapshot of session state
+/// A complete snapshot of session state — every repo as a (container, host) pair
 #[derive(Debug)]
 pub struct SessionSnapshot {
-    pub repos: BTreeMap<String, RepoInfo>,
+    pub repos: BTreeMap<String, RepoPair>,
 }
 
 impl SessionSnapshot {
