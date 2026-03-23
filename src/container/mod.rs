@@ -338,6 +338,9 @@ async fn attach_container(
     let _raw_guard = RawModeGuard::enable()?;
 
     // Spawn a task to forward host stdin -> container stdin
+    // Detect Ctrl-C (0x03) in raw mode and exit
+    let ctrlc_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let ctrlc_count_clone = ctrlc_count.clone();
     let stdin_handle = tokio::spawn(async move {
         let mut stdin = tokio::io::stdin();
         let mut buf = [0u8; 4096];
@@ -345,6 +348,17 @@ async fn attach_container(
             match stdin.read(&mut buf).await {
                 Ok(0) => break,      // EOF
                 Ok(n) => {
+                    // Check for Ctrl-C (0x03) — in raw mode it comes as a byte, not SIGINT
+                    if buf[..n].contains(&0x03) {
+                        let count = ctrlc_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if count >= 1 {
+                            // Second Ctrl-C: force exit
+                            let _ = crossterm::terminal::disable_raw_mode();
+                            eprintln!("\r\n→ Detached.");
+                            std::process::exit(0);
+                        }
+                        // First Ctrl-C: forward to container (Claude handles it)
+                    }
                     if input.write_all(&buf[..n]).await.is_err() {
                         break;
                     }

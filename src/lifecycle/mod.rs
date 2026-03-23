@@ -643,7 +643,7 @@ impl Lifecycle {
 
         Ok(TokenMount::File {
             host_path: token_file,
-            container_path: PathBuf::from("/home/developer/.claude/api_key"),
+            container_path: PathBuf::from("/run/secrets/claude_token"),
         })
     }
 
