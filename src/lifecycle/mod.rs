@@ -914,12 +914,15 @@ fn check_container_staleness(
 
     match script_mount {
         Some(mount) => {
-            let expected_source = script_dir.to_string_lossy();
+            // The mount source is the full path to the script file
+            // (e.g. /path/to/claude-container/lib/container/cc-entrypoint).
+            // Verify it's under the expected script_dir.
             let actual_source = mount.source.to_string_lossy();
-            if actual_source != expected_source {
+            let expected_prefix = script_dir.to_string_lossy();
+            if !actual_source.starts_with(expected_prefix.as_ref()) {
                 reasons.push(format!(
-                    "script dir mismatch: mounted from {}, expected {}",
-                    actual_source, expected_source
+                    "script dir mismatch: mounted from {}, expected under {}",
+                    actual_source, expected_prefix
                 ));
             }
         }

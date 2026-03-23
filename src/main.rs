@@ -395,8 +395,10 @@ async fn cmd_start(
         container: target,
     };
 
-    // Step 4: Launch
+    // Step 4: Launch — flush stderr before raw mode takes over
     eprintln!();
+    use std::io::Write;
+    std::io::stderr().flush().ok();
     container::launch(&lc, ready, name, &script_dir).await?;
 
     Ok(())
