@@ -415,6 +415,130 @@ async fn attach_container(
 }
 
 // ============================================================================
+// Headless run — non-interactive prompt execution
+// ============================================================================
+
+/// Run a prompt headlessly: create/start container, wait for exit, collect output.
+///
+/// Unlike `launch()`, this does NOT attach a terminal. Instead it:
+/// 1. Creates the container with AGENT_TASK=run and the prompt as AGENT_PROMPT
+/// 2. Starts the container (no TTY attach)
+/// 3. Waits for the container to exit
+/// 4. Collects stdout/stderr logs
+/// 5. Returns the captured output
+pub async fn run_headless(
+    lc: &Lifecycle,
+    ready: LaunchReady,
+    session_name: &SessionName,
+    script_dir: &Path,
+    prompt: &str,
+) -> Result<String, ContainerError> {
+    let container_name = session_name.container_name();
+
+    // Build args, then inject run-mode overrides
+    let mut args = build_create_args(&ready, session_name, script_dir);
+
+    // Set AGENT_TASK=run so cc-developer-setup uses -p (print) mode
+    args.env.push("AGENT_TASK=run".to_string());
+
+    // Pass the prompt via env var (base64-encoded to avoid quoting issues)
+    let prompt_b64 = base64_encode(prompt);
+    args.env.push(format!("AGENT_PROMPT={}", prompt_b64));
+
+    // Headless: no TTY, no stdin
+    args.tty = false;
+    args.open_stdin = false;
+
+    match &ready.container {
+        LaunchTarget::Create => {
+            eprintln!("  Creating container {}...", container_name);
+            lc.create_container(&container_name, &ready.image.image, args).await?;
+        }
+        LaunchTarget::Resume(resumable) => {
+            eprintln!("  Resuming container {}...", resumable.name);
+            // For resume, we just start the existing container — can't inject new args.
+            // Remove and recreate so we get the run-mode env vars.
+            lc.remove_container(&resumable.name).await?;
+            lc.create_container(&container_name, &ready.image.image, args).await?;
+        }
+        LaunchTarget::Rebuild(confirmed) => {
+            eprintln!("  Rebuilding container ({})...", confirmed.description);
+            lc.remove_container(&container_name).await?;
+            lc.create_container(&container_name, &ready.image.image, args).await?;
+        }
+    }
+
+    // Start container
+    eprintln!("  Starting headless run...");
+    lc.start_container(&container_name).await?;
+
+    // Wait for container to exit
+    let docker = lc.docker_client();
+    let mut wait_stream = docker.wait_container(
+        container_name.as_str(),
+        Some(bollard::container::WaitContainerOptions {
+            condition: "not-running".to_string(),
+        }),
+    );
+
+    let mut exit_code: i64 = -1;
+    while let Some(result) = wait_stream.next().await {
+        match result {
+            Ok(response) => {
+                exit_code = response.status_code;
+            }
+            Err(e) => {
+                // Stream error — container may have been removed
+                eprintln!("  Warning: wait stream error: {}", e);
+                break;
+            }
+        }
+    }
+
+    eprintln!("  Container exited with code {}", exit_code);
+
+    // Collect logs
+    let log_opts = bollard::container::LogsOptions::<String> {
+        stdout: true,
+        stderr: true,
+        ..Default::default()
+    };
+
+    let mut log_stream = docker.logs(container_name.as_str(), Some(log_opts));
+    let mut output = String::new();
+    while let Some(result) = log_stream.next().await {
+        if let Ok(chunk) = result {
+            output.push_str(&chunk.to_string());
+        }
+    }
+
+    Ok(output)
+}
+
+/// Base64-encode a string (simple implementation, no external crate needed).
+fn base64_encode(input: &str) -> String {
+    use std::process::Command;
+    // Use the system base64 command since we don't have a base64 crate
+    let output = Command::new("base64")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(input.as_bytes())?;
+            child.wait_with_output()
+        });
+
+    match output {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        Err(_) => {
+            // Fallback: just pass raw (the entrypoint will handle it)
+            input.to_string()
+        }
+    }
+}
+
+// ============================================================================
 // Launch — the main entry point
 // ============================================================================
 

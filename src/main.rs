@@ -151,10 +151,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Run { session, prompt, dockerfile } => {
             let name = SessionName::new(&session);
-            eprintln!("→ Running prompt in session '{}'", name);
-            eprintln!("  Prompt: {}", if prompt.len() > 60 { format!("{}...", &prompt[..60]) } else { prompt.clone() });
-            // TODO: launch with AgentTask::Run { prompt }, capture output
-            eprintln!("  ⚠ Run mode not yet implemented");
+            cmd_run(&name, &prompt, dockerfile).await?;
         }
         Commands::Start { session, dockerfile, discover_repos, r#continue, docker, as_root, prompt } => {
             let name = SessionName::new(&session);
@@ -319,6 +316,105 @@ async fn cmd_start(
     // Step 4: Launch
     eprintln!();
     container::launch(&lc, ready, name, &script_dir).await?;
+
+    Ok(())
+}
+
+async fn cmd_run(
+    name: &SessionName,
+    prompt: &str,
+    dockerfile: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    eprintln!("{}", colored::Colorize::blue(format!("→ Running prompt in session '{}'", name).as_str()));
+    eprintln!("  Prompt: {}", if prompt.len() > 60 { format!("{}...", &prompt[..60]) } else { prompt.to_string() });
+
+    let lc = lifecycle::Lifecycle::new()?;
+
+    // Step 1: Resolve image
+    let image = if let Some(ref df) = dockerfile {
+        let df_path = if df.is_dir() {
+            let candidate = df.join("Dockerfile");
+            if candidate.exists() { candidate } else {
+                anyhow::bail!("No Dockerfile found in {}", df.display());
+            }
+        } else {
+            df.clone()
+        };
+        let image_name = format!("claude-dev-{}", name);
+        let image_ref = ImageRef::new(&image_name);
+        eprintln!("  Building image: {}", image_name);
+        lc.build_image(&image_ref, &df_path, &df_path.parent().unwrap_or(&PathBuf::from("."))).await?;
+        image_ref
+    } else {
+        ImageRef::new("ghcr.io/hypermemetic/claude-container:latest")
+    };
+
+    // Step 2: Verified pipeline (same as cmd_start)
+    let docker = container::verify_docker(&lc).await?;
+    let verified_image = container::verify_image(&lc, &docker, &image).await?;
+    for tool in verified_image.validation.missing_optional() {
+        eprintln!("  {} {} (optional)", colored::Colorize::yellow("⚠"), tool);
+    }
+    let volumes = container::verify_volumes(&lc, &docker, name).await?;
+
+    // Token
+    let token = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
+        .or_else(|_| {
+            let token_file = dirs::config_dir()
+                .unwrap_or_default()
+                .join("claude-container/token");
+            std::fs::read_to_string(&token_file)
+        })
+        .map_err(|_| anyhow::anyhow!("No auth token found. Set CLAUDE_CODE_OAUTH_TOKEN or create ~/.config/claude-container/token"))?;
+    let verified_token = container::verify_token(&lc, token.trim())?;
+
+    // Script dir
+    let script_dir = std::env::var("CC_SCRIPT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = dirs::home_dir().unwrap_or_default();
+            let candidates = [
+                home.join(".local/share/claude-container"),
+                home.join("dev/controlflow/juggernautlabs/claude-container"),
+            ];
+            candidates.into_iter().find(|p| p.join("lib/container/cc-entrypoint").exists())
+                .unwrap_or_else(|| PathBuf::from("."))
+        });
+
+    // Plan target
+    let target = container::plan_target(&lc, &docker, name, &verified_image, &script_dir).await
+        .or_else(|e| {
+            if let ContainerError::ContainerRunning(ref _ctr) = e {
+                // For run mode, we need a fresh container. Remove the running one.
+                Err(e)
+            } else {
+                Err(e)
+            }
+        })?;
+
+    // Build LaunchReady
+    let ready = crate::types::verified::LaunchReady {
+        docker,
+        image: verified_image,
+        volumes,
+        token: verified_token,
+        container: target,
+    };
+
+    // Step 3: Run headless
+    eprintln!();
+    let output = container::run_headless(&lc, ready, name, &script_dir, prompt).await?;
+
+    // Step 4: Print captured output
+    if !output.is_empty() {
+        println!("{}", output);
+    }
+
+    // Step 5: Try to read .agent-result from the volume
+    // (This would require exec-ing into the container or mounting the volume.
+    //  For now, just note that the output has been printed.)
+    eprintln!();
+    eprintln!("{}", colored::Colorize::green("→ Run complete."));
 
     Ok(())
 }

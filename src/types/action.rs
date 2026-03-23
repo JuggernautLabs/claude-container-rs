@@ -120,7 +120,7 @@ impl SessionSyncPlan {
 }
 
 impl Action for SessionSyncPlan {
-    type Result = (); // TODO: SyncResult type
+    type Result = SyncResult;
     type Error = super::ContainerError;
 
     fn preview(self) -> Result<Plan<Self>, Self::Error> {
@@ -134,8 +134,80 @@ impl Action for SessionSyncPlan {
     }
 
     fn execute(self) -> Result<Self::Result, Self::Error> {
-        // TODO: execute sync actions
-        unimplemented!("SessionSyncPlan::execute not yet implemented")
+        // Synchronous Action::execute cannot run async code.
+        // Use SyncEngine::execute_sync() directly instead.
+        unimplemented!(
+            "SessionSyncPlan::execute() is not usable directly — \
+             call SyncEngine::execute_sync() which is async"
+        )
+    }
+}
+
+// ============================================================================
+// Extract / merge / sync result types
+// ============================================================================
+
+/// Result of extracting a repo from a container volume via git bundle.
+#[derive(Debug, Clone)]
+pub struct ExtractResult {
+    /// Number of commits in the bundle
+    pub commit_count: u32,
+    /// The new HEAD on the session branch after extraction
+    pub new_head: super::CommitHash,
+}
+
+/// Result of syncing one repo (extract + merge, inject, etc.)
+#[derive(Debug)]
+pub enum RepoSyncResult {
+    /// Successfully pulled (extract + merge)
+    Pulled {
+        repo_name: String,
+        extract: ExtractResult,
+        merge: super::git::MergeOutcome,
+    },
+    /// Successfully pushed (inject)
+    Pushed {
+        repo_name: String,
+    },
+    /// Successfully cloned to host
+    ClonedToHost {
+        repo_name: String,
+        extract: ExtractResult,
+    },
+    /// Skipped (already in sync or blocked)
+    Skipped {
+        repo_name: String,
+        reason: String,
+    },
+    /// Failed
+    Failed {
+        repo_name: String,
+        error: String,
+    },
+}
+
+/// Aggregate result of executing a full SessionSyncPlan.
+#[derive(Debug)]
+pub struct SyncResult {
+    pub session_name: super::SessionName,
+    pub results: Vec<RepoSyncResult>,
+}
+
+impl SyncResult {
+    pub fn succeeded(&self) -> usize {
+        self.results.iter().filter(|r| matches!(r,
+            RepoSyncResult::Pulled { .. } |
+            RepoSyncResult::Pushed { .. } |
+            RepoSyncResult::ClonedToHost { .. }
+        )).count()
+    }
+
+    pub fn failed(&self) -> usize {
+        self.results.iter().filter(|r| matches!(r, RepoSyncResult::Failed { .. })).count()
+    }
+
+    pub fn skipped(&self) -> usize {
+        self.results.iter().filter(|r| matches!(r, RepoSyncResult::Skipped { .. })).count()
     }
 }
 
