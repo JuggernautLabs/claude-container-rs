@@ -10,7 +10,7 @@ use types::*;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "claude-container", version, about = "Container-isolated Claude Code sessions")]
+#[command(name = "git-sandbox", version, about = "Container-isolated Claude Code sessions")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
