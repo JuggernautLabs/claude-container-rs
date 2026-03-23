@@ -91,7 +91,7 @@ async fn test_verified_pipeline_rejects_bad_image() {
     let docker_proof = container::verify_docker(&lc).await.expect("Docker available");
 
     let bad_image = ImageRef::new("alpine:latest");
-    let result = container::verify_image(&lc, &docker_proof, &bad_image).await;
+    let result: Result<_, ContainerError> = container::verify_image(&lc, &docker_proof, &bad_image).await;
     assert!(result.is_err(), "alpine should fail image validation");
     match result.unwrap_err() {
         ContainerError::ImageInvalid { missing, .. } => {
@@ -115,4 +115,45 @@ fn test_verified_types_enforce_ordering() {
     // etc.
 
     // This test passes by existing — it verifies the API surface is correct.
+}
+
+/// Test that entrypoint scripts exist at the expected path in the script dir.
+/// This is the root cause of "cc-entrypoint: No such file or directory" —
+/// if the path is wrong, the bind mount won't find the file.
+#[test]
+fn test_entrypoint_scripts_exist_on_host() {
+    let script_dir = find_script_dir();
+    let container_scripts_dir = script_dir.join("lib/container");
+
+    for script in &["cc-entrypoint", "cc-developer-setup", "cc-agent-run"] {
+        let path = container_scripts_dir.join(script);
+        assert!(
+            path.exists(),
+            "Script '{}' should exist at {}. The container mount will fail without it.",
+            script,
+            path.display()
+        );
+        // Also check it's executable
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::metadata(&path).unwrap().permissions();
+            assert!(
+                perms.mode() & 0o111 != 0,
+                "Script '{}' at {} should be executable",
+                script,
+                path.display()
+            );
+        }
+    }
+
+    // Verify the build_create_args code uses lib/container/ subdirectory, not root
+    // (This is the bug we're testing for — the rust code was joining script_dir + "cc-entrypoint"
+    //  instead of script_dir + "lib/container/cc-entrypoint")
+    let wrong_path = script_dir.join("cc-entrypoint");
+    assert!(
+        !wrong_path.exists(),
+        "cc-entrypoint should NOT exist at repo root {}. It should be at lib/container/cc-entrypoint.",
+        wrong_path.display()
+    );
 }

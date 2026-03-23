@@ -206,15 +206,18 @@ fn build_create_args(
     ));
 
     // --- Bind mounts for entrypoint scripts ---
+    let container_scripts_dir = script_dir.join("lib/container");
     let scripts = ["cc-entrypoint", "cc-developer-setup", "cc-agent-run"];
     for script in &scripts {
-        let host_path = script_dir.join(script);
+        let host_path = container_scripts_dir.join(script);
         if host_path.exists() {
             args.binds.push(format!(
                 "{}:/usr/local/bin/{}:ro",
                 host_path.display(),
                 script,
             ));
+        } else {
+            eprintln!("  ⚠ Script not found: {}", host_path.display());
         }
     }
 
