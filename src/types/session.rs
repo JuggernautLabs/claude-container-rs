@@ -1,20 +1,17 @@
 //! Session type-state machine.
 //!
-//! A session progresses through states. The type system prevents
-//! invalid transitions at compile time:
-//!
 //!   Uncreated → Created → Running → Stopped → Running (resume)
 //!                  ↓                    ↓
 //!               Deleted             Deleted
 //!
-//! You can't `pull` from an Uncreated session.
-//! You can't `start` an already Running session.
-//! You can't `resume` a session that was never created.
+//! Invalid transitions are compile errors.
 
 use std::path::PathBuf;
-use super::{SessionName, ContainerName, ImageRef, ImageId, VolumeName};
+use super::ids::{SessionName, ImageRef};
+use super::volume::SessionVolumes;
+use super::docker::ContainerInspect;
 
-/// Session metadata persisted to disk (~/.config/claude-container/sessions/<name>.env)
+/// Session metadata persisted to disk
 #[derive(Debug, Clone)]
 pub struct SessionMetadata {
     pub name: SessionName,
@@ -40,12 +37,12 @@ impl Default for SessionMetadata {
     }
 }
 
-/// Type-state: session does not exist yet
+/// Type-state: session does not exist
 pub struct Uncreated {
     pub name: SessionName,
 }
 
-/// Type-state: session volumes exist, repos cloned
+/// Type-state: volumes exist, repos cloned, no container
 pub struct Created {
     pub name: SessionName,
     pub metadata: SessionMetadata,
@@ -57,118 +54,77 @@ pub struct Running {
     pub name: SessionName,
     pub metadata: SessionMetadata,
     pub volumes: SessionVolumes,
-    pub container: ContainerInfo,
+    pub container: ContainerInspect,
 }
 
-/// Type-state: container exists but is stopped
+/// Type-state: container exists but stopped
 pub struct Stopped {
     pub name: SessionName,
     pub metadata: SessionMetadata,
     pub volumes: SessionVolumes,
-    pub container: ContainerInfo,
+    pub container: ContainerInspect,
 }
 
-/// The set of volumes for a session
-#[derive(Debug, Clone)]
-pub struct SessionVolumes {
-    pub session: VolumeName,
-    pub state: VolumeName,
-    pub cargo: VolumeName,
-    pub npm: VolumeName,
-    pub pip: VolumeName,
-}
+// --- Transitions (consume self, return new state) ---
 
-impl SessionVolumes {
-    pub fn for_session(name: &SessionName) -> Self {
-        Self {
-            session: name.session_volume(),
-            state: name.state_volume(),
-            cargo: name.cargo_volume(),
-            npm: name.npm_volume(),
-            pip: name.pip_volume(),
-        }
-    }
-
-    pub fn all(&self) -> [&VolumeName; 5] {
-        [&self.session, &self.state, &self.cargo, &self.npm, &self.pip]
-    }
-}
-
-/// Info about a container (from docker inspect)
-#[derive(Debug, Clone)]
-pub struct ContainerInfo {
-    pub name: ContainerName,
-    pub image_id: ImageId,
-    pub image_name: ImageRef,
-    pub user: String,
-    pub entrypoint_mount: Option<PathBuf>,
-}
-
-/// Transitions — each method consumes self and returns the new state.
-/// Invalid transitions don't exist as methods.
 impl Uncreated {
-    /// Create the session: volumes + clone repos
-    pub fn create(self, metadata: SessionMetadata) -> Created {
-        let volumes = SessionVolumes::for_session(&self.name);
-        Created {
-            name: self.name,
-            metadata,
-            volumes,
-        }
+    pub fn create(self, metadata: SessionMetadata, volumes: SessionVolumes) -> Created {
+        Created { name: self.name, metadata, volumes }
     }
 }
 
 impl Created {
-    /// Start a new container
-    pub fn start(self, container: ContainerInfo) -> Running {
-        Running {
-            name: self.name,
-            metadata: self.metadata,
-            volumes: self.volumes,
-            container,
-        }
+    pub fn start(self, container: ContainerInspect) -> Running {
+        Running { name: self.name, metadata: self.metadata, volumes: self.volumes, container }
     }
-
-    /// Delete the session (volumes remain until explicitly purged)
     pub fn delete(self) -> Uncreated {
         Uncreated { name: self.name }
     }
 }
 
 impl Running {
-    /// Container stops (Claude exits)
     pub fn stop(self) -> Stopped {
-        Stopped {
-            name: self.name,
-            metadata: self.metadata,
-            volumes: self.volumes,
-            container: self.container,
-        }
+        Stopped { name: self.name, metadata: self.metadata, volumes: self.volumes, container: self.container }
     }
 }
 
 impl Stopped {
-    /// Resume the stopped container
     pub fn resume(self) -> Running {
-        Running {
-            name: self.name,
-            metadata: self.metadata,
-            volumes: self.volumes,
-            container: self.container,
-        }
+        Running { name: self.name, metadata: self.metadata, volumes: self.volumes, container: self.container }
     }
-
-    /// Remove the container (keep volumes) and return to Created state
     pub fn remove_container(self) -> Created {
-        Created {
-            name: self.name,
-            metadata: self.metadata,
-            volumes: self.volumes,
-        }
+        Created { name: self.name, metadata: self.metadata, volumes: self.volumes }
     }
-
-    /// Delete everything
     pub fn delete(self) -> Uncreated {
         Uncreated { name: self.name }
     }
+}
+
+// --- Runtime discovery (we don't know the state at compile time) ---
+
+/// Discovered session state — what we find when we look at Docker
+#[derive(Debug)]
+pub enum DiscoveredSession {
+    /// No volumes, no container
+    DoesNotExist(SessionName),
+    /// Volumes exist, no container
+    VolumesOnly {
+        name: SessionName,
+        metadata: Option<SessionMetadata>,
+        volumes: SessionVolumes,
+    },
+    /// Stopped container
+    Stopped {
+        name: SessionName,
+        metadata: Option<SessionMetadata>,
+        volumes: SessionVolumes,
+        container: ContainerInspect,
+    },
+    /// Running container
+    Running {
+        name: SessionName,
+        metadata: Option<SessionMetadata>,
+        volumes: SessionVolumes,
+        container: ContainerInspect,
+    },
 }
