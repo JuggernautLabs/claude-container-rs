@@ -23,25 +23,25 @@ pub fn rule(label: Option<&str>) {
 /// Render session info
 pub fn session_info(
     name: &SessionName,
-    discovered: &session::DiscoveredSession,
+    discovered: &crate::types::DiscoveredSession,
     config: Option<&SessionConfig>,
 ) {
     rule(Some(&format!("session: {}", name)));
     println!();
 
     match discovered {
-        session::DiscoveredSession::DoesNotExist(_) => {
+        crate::types::DiscoveredSession::DoesNotExist(_) => {
             println!("  {} session does not exist", "✗".red());
         }
-        session::DiscoveredSession::VolumesOnly { volumes, metadata, .. } => {
+        crate::types::DiscoveredSession::VolumesOnly { volumes, metadata, .. } => {
             println!("  container: {}", "none".dimmed());
             render_session_common(name, metadata.as_ref(), config);
         }
-        session::DiscoveredSession::Stopped { container, metadata, .. } => {
+        crate::types::DiscoveredSession::Stopped { container, metadata, .. } => {
             println!("  container: {}  ({})", "stopped".dimmed(), name.container_name());
             render_session_common(name, metadata.as_ref(), config);
         }
-        session::DiscoveredSession::Running { container, metadata, .. } => {
+        crate::types::DiscoveredSession::Running { container, metadata, .. } => {
             println!("  container: {}  ({})", "running".green(), name.container_name());
             render_session_common(name, metadata.as_ref(), config);
         }
