@@ -875,7 +875,58 @@ pub async fn launch(
         LaunchTarget::Resume(resumable) => {
             eprintln!("  Resuming container {}...", resumable.name);
             lc.start_container(&resumable.name).await?;
-            attach_container(lc, &resumable.name, false).await?;
+
+            // Race: wait briefly for the container to either settle or exit.
+            // If it exits within 1s (crashed entrypoint, bad CMD), report it
+            // instead of hanging forever on an empty attach stream.
+            let docker = lc.docker_client();
+            let wait_fut = async {
+                let mut wait = docker.wait_container(
+                    resumable.name.as_str(),
+                    Some(bollard::container::WaitContainerOptions {
+                        condition: "not-running".to_string(),
+                    }),
+                );
+                while let Some(r) = wait.next().await {
+                    if let Ok(resp) = r { return Some(resp.status_code); }
+                }
+                None
+            };
+
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                wait_fut,
+            ).await;
+
+            match result {
+                Ok(Some(exit_code)) => {
+                    // Container exited within 1 second — it crashed
+                    let mut logs = String::new();
+                    let mut log_stream = docker.logs(
+                        resumable.name.as_str(),
+                        Some(bollard::container::LogsOptions::<String> {
+                            stdout: true, stderr: true, tail: "20".to_string(),
+                            ..Default::default()
+                        }),
+                    );
+                    while let Some(Ok(chunk)) = log_stream.next().await {
+                        logs.push_str(&chunk.to_string());
+                    }
+                    eprintln!("  {} Container exited immediately (code {}).", colored::Colorize::red("✗"), exit_code);
+                    if !logs.trim().is_empty() {
+                        eprintln!("  Last output:");
+                        for line in logs.lines().take(10) {
+                            eprintln!("    {}", line);
+                        }
+                    }
+                    eprintln!("  Run `session -s {} rebuild` to create a fresh container.", session_name);
+                    return Err(ContainerError::NonInteractive("Container exited immediately".into()));
+                }
+                _ => {
+                    // Container still running after 1s — it's alive, attach
+                    attach_container(lc, &resumable.name, false).await?;
+                }
+            }
         }
 
         LaunchTarget::Rebuild(confirmed) => {
