@@ -325,6 +325,12 @@ impl RepoPair {
         }
 
         if let Some(ref st_rel) = self.session_to_target {
+            // If trees are identical (content same despite different SHAs, e.g. after squash),
+            // it's truly up-to-date — don't suggest merge.
+            if st_rel.content == ContentComparison::Identical {
+                return skip_decision;
+            }
+
             match &st_rel.ancestry {
                 // Session is ahead of target — needs merge
                 Ancestry::ContainerAhead { container_ahead } if *container_ahead > 0 => {

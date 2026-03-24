@@ -902,8 +902,13 @@ echo "BUNDLE_OK"
                     })
                     .collect();
 
-                // Clean up the merge state
+                // Clean up: clear merge state AND restore working tree to pre-merge state.
+                // Without checkout_head, conflict markers stay in the working tree
+                // and every subsequent check sees "host has uncommitted changes."
                 repo.cleanup_state()?;
+                repo.checkout_head(Some(
+                    git2::build::CheckoutBuilder::new().force(),
+                ))?;
 
                 return Ok(MergeOutcome::Conflict { files: conflict_files });
             }
@@ -976,6 +981,9 @@ echo "BUNDLE_OK"
                 .collect();
 
             repo.cleanup_state()?;
+            repo.checkout_head(Some(
+                git2::build::CheckoutBuilder::new().force(),
+            ))?;
             return Ok(MergeOutcome::Conflict { files: conflict_files });
         }
 
