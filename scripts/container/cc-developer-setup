@@ -243,7 +243,7 @@ if [[ -n "${CLAUDE_PASSTHROUGH_ARGS:-}" ]]; then
     done <<< "$PASSTHROUGH_DECODED"
 fi
 
-# Check for merge-into or sync summary to use as initial prompt
+# Check for initial prompt from various sources
 CLAUDE_INITIAL_PROMPT=""
 if [[ -f /workspace/.merge-into-summary ]]; then
     CLAUDE_INITIAL_PROMPT=$(cat /workspace/.merge-into-summary)
@@ -251,6 +251,14 @@ if [[ -f /workspace/.merge-into-summary ]]; then
 elif [[ -f /workspace/.sync-summary ]]; then
     CLAUDE_INITIAL_PROMPT=$(cat /workspace/.sync-summary)
     rm -f /workspace/.sync-summary 2>/dev/null || true
+fi
+
+# For conflict resolution: use the CLAUDE.md content as initial prompt
+# so Claude acts on it immediately instead of waiting for user input
+if [[ "${AGENT_TASK:-}" == "resolve-conflicts" || "${AGENT_TASK:-}" == "rebase-conflicts" ]]; then
+    if [[ -z "$CLAUDE_INITIAL_PROMPT" && -f /workspace/CLAUDE.md ]]; then
+        CLAUDE_INITIAL_PROMPT=$(cat /workspace/CLAUDE.md)
+    fi
 fi
 
 # Launch via agent wrapper
