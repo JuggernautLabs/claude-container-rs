@@ -1065,25 +1065,27 @@ echo "BUNDLE_OK"
             None => String::new(),
         };
 
+        // Run as root (volume mount is root-owned), then chown to host UID
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+
         let script = format!(
             r#"
 export HOME=/tmp
 git config --global --add safe.directory "*"
 git clone {branch_flag} "/upstream" "/session/{repo_name}" || exit 1
+chown -R {uid}:{gid} "/session/{repo_name}" 2>/dev/null || true
 cd "/session/{repo_name}" || exit 1
 echo "Cloned $(git rev-parse --short HEAD) on $(git symbolic-ref --short HEAD 2>/dev/null || echo 'detached')"
 "#,
             branch_flag = branch_flag,
             repo_name = repo_name,
+            uid = uid,
+            gid = gid,
         );
-
-        // Run clone as host UID so files are owned by the developer user
-        let uid = unsafe { libc::getuid() };
-        let gid = unsafe { libc::getgid() };
 
         let config = ContainerConfig {
             image: Some(GIT_UTIL_IMAGE.to_string()),
-            user: Some(format!("{}:{}", uid, gid)),
             entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
             cmd: Some(vec![script]),
             host_config: Some(bollard::models::HostConfig {
@@ -1106,7 +1108,7 @@ echo "Cloned $(git rev-parse --short HEAD) on $(git symbolic-ref --short HEAD 2>
             .start_container(&container_name, None::<StartContainerOptions<String>>)
             .await?;
 
-        // Wait for exit
+        // Wait for exit (handle DockerContainerWaitError as exit code)
         let mut wait_stream = self
             .docker
             .wait_container(&container_name, None::<WaitContainerOptions<String>>);
@@ -1114,13 +1116,10 @@ echo "Cloned $(git rev-parse --short HEAD) on $(git symbolic-ref --short HEAD 2>
         while let Some(result) = wait_stream.next().await {
             match result {
                 Ok(resp) => exit_code = resp.status_code,
-                Err(e) => {
-                    let _ = self.docker.remove_container(
-                        &container_name,
-                        Some(RemoveContainerOptions { force: true, ..Default::default() }),
-                    ).await;
-                    return Err(ContainerError::Docker(e));
+                Err(bollard::errors::Error::DockerContainerWaitError { code, .. }) => {
+                    exit_code = code;
                 }
+                Err(_) => {}
             }
         }
 
