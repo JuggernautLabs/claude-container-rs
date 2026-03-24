@@ -32,3 +32,9 @@ pub use git::*;
 pub use docker::*;
 pub use agent::*;
 pub use error::*;
+
+/// Label key used to mark throwaway containers for garbage collection.
+pub const THROWAWAY_LABEL: &str = "claude-container.throwaway";
+
+/// Label key used to associate a throwaway container with a session.
+pub const SESSION_LABEL: &str = "claude-container.session";

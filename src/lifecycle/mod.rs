@@ -202,10 +202,14 @@ impl Lifecycle {
         // Create a throwaway container
         let container_name = format!("claude-validate-{}", &hash_string(&image_id)[..12]);
 
+        let mut throwaway_labels = std::collections::HashMap::new();
+        throwaway_labels.insert(crate::types::THROWAWAY_LABEL.to_string(), "true".to_string());
+
         let config = Config {
             image: Some(image.as_str().to_string()),
             entrypoint: Some(vec!["sh".to_string()]),
             cmd: Some(vec!["-c".to_string(), check_script]),
+            labels: Some(throwaway_labels),
             ..Default::default()
         };
 

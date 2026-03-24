@@ -388,12 +388,17 @@ impl SessionManager {
             )
             .await;
 
+        let mut cfg_labels = std::collections::HashMap::new();
+        cfg_labels.insert(crate::types::THROWAWAY_LABEL.to_string(), "true".to_string());
+        cfg_labels.insert(crate::types::SESSION_LABEL.to_string(), name.to_string());
+
         let config = bollard::container::Config {
             image: Some("alpine:latest".to_string()),
             cmd: Some(vec![
                 "cat".to_string(),
                 "/session/.claude-projects.yml".to_string(),
             ]),
+            labels: Some(cfg_labels),
             host_config: Some(bollard::models::HostConfig {
                 binds: Some(vec![format!("{}:/session:ro", volume_name)]),
                 ..Default::default()
@@ -495,10 +500,15 @@ impl SessionManager {
         // Write via base64-encoded pipe — safe for any YAML content
         let script = crate::shell_safety::write_config_script(&yaml);
 
+        let mut wcfg_labels = std::collections::HashMap::new();
+        wcfg_labels.insert(crate::types::THROWAWAY_LABEL.to_string(), "true".to_string());
+        wcfg_labels.insert(crate::types::SESSION_LABEL.to_string(), name.to_string());
+
         let cfg = bollard::container::Config {
             image: Some("alpine:latest".to_string()),
             entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
             cmd: Some(vec![script]),
+            labels: Some(wcfg_labels),
             host_config: Some(bollard::models::HostConfig {
                 binds: Some(vec![format!("{}:/session", volume_name)]),
                 ..Default::default()

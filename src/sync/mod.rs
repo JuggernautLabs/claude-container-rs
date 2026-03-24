@@ -20,6 +20,14 @@ use crate::types::{
     SessionSyncPlan, SquashState, SyncDecision, SyncResult, TargetAheadKind, VolumeRepo,
 };
 
+/// Build the standard labels HashMap for a throwaway container.
+fn throwaway_labels(session: &SessionName) -> std::collections::HashMap<String, String> {
+    let mut labels = std::collections::HashMap::new();
+    labels.insert(crate::types::THROWAWAY_LABEL.to_string(), "true".to_string());
+    labels.insert(crate::types::SESSION_LABEL.to_string(), session.to_string());
+    labels
+}
+
 /// Git utility image used for container-side scans.
 const GIT_UTIL_IMAGE: &str = "alpine/git";
 
@@ -79,6 +87,7 @@ impl SyncEngine {
             image: Some(GIT_UTIL_IMAGE.to_string()),
             entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
             cmd: Some(vec![SCAN_SCRIPT.to_string()]),
+            labels: Some(throwaway_labels(session)),
             host_config: Some(bollard::models::HostConfig {
                 binds: Some(vec![format!("{}:/session:ro", volume_name)]),
                 ..Default::default()
@@ -619,6 +628,7 @@ echo "BUNDLE_OK"
             image: Some(GIT_UTIL_IMAGE.to_string()),
             entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
             cmd: Some(vec![script]),
+            labels: Some(throwaway_labels(session)),
             host_config: Some(bollard::models::HostConfig {
                 binds: Some(vec![
                     format!("{}:/session:ro", volume_name),
@@ -1062,6 +1072,7 @@ echo "Cloned $(git rev-parse --short HEAD) on $(git symbolic-ref --short HEAD 2>
             image: Some(GIT_UTIL_IMAGE.to_string()),
             entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
             cmd: Some(vec![script]),
+            labels: Some(throwaway_labels(session)),
             host_config: Some(bollard::models::HostConfig {
                 binds: Some(vec![
                     format!("{}:/session", volume_name),
@@ -1154,6 +1165,7 @@ echo "Cloned $(git rev-parse --short HEAD) on $(git symbolic-ref --short HEAD 2>
             image: Some(GIT_UTIL_IMAGE.to_string()),
             entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
             cmd: Some(vec![format!("echo '{}' > /session/.main-project", main_project)]),
+            labels: Some(throwaway_labels(session)),
             host_config: Some(bollard::models::HostConfig {
                 binds: Some(vec![format!("{}:/session", volume_name)]),
                 ..Default::default()
@@ -1216,6 +1228,7 @@ git remote remove _cc_upstream 2>/dev/null
             image: Some(GIT_UTIL_IMAGE.to_string()),
             entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
             cmd: Some(vec![script]),
+            labels: Some(throwaway_labels(session)),
             host_config: Some(bollard::models::HostConfig {
                 binds: Some(vec![
                     format!("{}:/session", volume_name),

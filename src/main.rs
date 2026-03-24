@@ -141,7 +141,13 @@ enum Commands {
     },
     /// List all sessions
     #[command(name = "ls")]
-    List,
+    List {
+        /// Only show sessions that have at least one volume existing
+        #[arg(long)]
+        active: bool,
+    },
+    /// Remove orphaned throwaway containers
+    Gc,
     /// Validate a Docker image meets the container protocol
     #[command(name = "validate-image")]
     ValidateImage {
@@ -213,6 +219,8 @@ enum SessionAction {
     },
     /// Set a session property
     Set { key: String, value: String },
+    /// Remove orphaned throwaway containers for this session
+    Gc,
 }
 
 #[tokio::main]
@@ -226,8 +234,11 @@ async fn main() -> anyhow::Result<()> {
     let auto_yes = cli.yes;
 
     match cli.command {
-        Commands::List => {
-            cmd_list().await?;
+        Commands::List { active } => {
+            cmd_list(active).await?;
+        }
+        Commands::Gc => {
+            cmd_gc().await?;
         }
         Commands::ValidateImage { image, force } => {
             cmd_validate_image(&image, force).await?;
@@ -281,6 +292,9 @@ async fn main() -> anyhow::Result<()> {
                 SessionAction::Set { key, value } => {
                     eprintln!("Setting {}={} — not yet wired to metadata", key, value);
                 }
+                SessionAction::Gc => {
+                    cmd_session_gc(&name).await?;
+                }
             }
         }
         Commands::Sync { session, branch, filter, all, dry_run, .. } => {
@@ -313,7 +327,7 @@ fn require_session(name: Option<SessionName>) -> anyhow::Result<SessionName> {
     name.ok_or_else(|| anyhow::anyhow!("--session required"))
 }
 
-async fn cmd_list() -> anyhow::Result<()> {
+async fn cmd_list(active_only: bool) -> anyhow::Result<()> {
     let lc = lifecycle::Lifecycle::new()?;
     let docker = lc.docker_client();
 
@@ -321,11 +335,14 @@ async fn cmd_list() -> anyhow::Result<()> {
     let volumes = docker.list_volumes(None::<bollard::volume::ListVolumesOptions<String>>).await?;
     let mut session_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
-    if let Some(vols) = volumes.volumes {
-        for vol in &vols {
-            if let Some(name) = vol.name.strip_prefix("claude-session-") {
-                session_names.insert(name.to_string());
-            }
+    let volume_names: std::collections::HashSet<String> = volumes.volumes
+        .as_ref()
+        .map(|vols| vols.iter().map(|v| v.name.clone()).collect())
+        .unwrap_or_default();
+
+    for vol_name in &volume_names {
+        if let Some(name) = vol_name.strip_prefix("claude-session-") {
+            session_names.insert(name.to_string());
         }
     }
 
@@ -348,6 +365,13 @@ async fn cmd_list() -> anyhow::Result<()> {
                 }
             }
         }
+    }
+
+    // If --active, filter to only sessions with at least one volume
+    if active_only {
+        session_names.retain(|name| {
+            volume_names.contains(&format!("claude-session-{}", name))
+        });
     }
 
     if session_names.is_empty() {
@@ -571,9 +595,24 @@ async fn cmd_start(
         ImageRef::new("ghcr.io/hypermemetic/claude-container:latest")
     };
 
-    // Step 3: Verified pipeline (shared with offer_reconciliation)
-    let (docker, verified_image, volumes, verified_token) =
-        build_launch_proofs(&lc, name, &image).await?;
+    // Step 3: Verified pipeline
+    let docker = container::verify_docker(&lc).await?;
+    let verified_image = container::verify_image(&lc, &docker, &image).await?;
+    for tool in verified_image.validation.missing_optional() {
+        eprintln!("  {} {} (optional)", colored::Colorize::yellow("⚠"), tool);
+    }
+    let volumes = container::verify_volumes(&lc, &docker, name).await?;
+
+    // Token — find it from env, file, or keychain
+    let token = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
+        .or_else(|_| {
+            let token_file = dirs::home_dir()
+                .unwrap_or_default()
+                .join(".config/claude-container/token");
+            std::fs::read_to_string(&token_file)
+        })
+        .map_err(|_| anyhow::anyhow!("No auth token found. Set CLAUDE_CODE_OAUTH_TOKEN or create ~/.config/claude-container/token"))?;
+    let verified_token = container::verify_token(&lc, token.trim())?;
 
     // Materialize embedded scripts to cache dir for Docker bind-mounts
     let script_dir = scripts::materialize()?;
@@ -640,9 +679,24 @@ async fn cmd_run(
         ImageRef::new("ghcr.io/hypermemetic/claude-container:latest")
     };
 
-    // Step 2: Verified pipeline (shared with cmd_start and offer_reconciliation)
-    let (docker, verified_image, volumes, verified_token) =
-        build_launch_proofs(&lc, name, &image).await?;
+    // Step 2: Verified pipeline (same as cmd_start)
+    let docker = container::verify_docker(&lc).await?;
+    let verified_image = container::verify_image(&lc, &docker, &image).await?;
+    for tool in verified_image.validation.missing_optional() {
+        eprintln!("  {} {} (optional)", colored::Colorize::yellow("⚠"), tool);
+    }
+    let volumes = container::verify_volumes(&lc, &docker, name).await?;
+
+    // Token
+    let token = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
+        .or_else(|_| {
+            let token_file = dirs::home_dir()
+                .unwrap_or_default()
+                .join(".config/claude-container/token");
+            std::fs::read_to_string(&token_file)
+        })
+        .map_err(|_| anyhow::anyhow!("No auth token found. Set CLAUDE_CODE_OAUTH_TOKEN or create ~/.config/claude-container/token"))?;
+    let verified_token = container::verify_token(&lc, token.trim())?;
 
     // Materialize embedded scripts to cache dir for Docker bind-mounts
     let script_dir = scripts::materialize()?;
@@ -893,10 +947,14 @@ async fn cmd_session_cleanup(name: &SessionName, auto_yes: bool) -> anyhow::Resu
     ).await;
 
     let script = "rm -f /session/.reconcile-complete /session/.merge-into-summary /session/.merge-into-branch /session/.sync-summary /session/.sync-branch 2>/dev/null; echo CLEANED";
+    let mut throwaway_labels = std::collections::HashMap::new();
+    throwaway_labels.insert(git_sandbox::THROWAWAY_LABEL.to_string(), "true".to_string());
+    throwaway_labels.insert(git_sandbox::SESSION_LABEL.to_string(), name.to_string());
     let config = bollard::container::Config {
         image: Some("alpine/git".to_string()),
         entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
         cmd: Some(vec![script.to_string()]),
+        labels: Some(throwaway_labels),
         host_config: Some(bollard::models::HostConfig {
             binds: Some(vec![format!("{}:/session", volume)]),
             ..Default::default()
@@ -920,6 +978,83 @@ async fn cmd_session_cleanup(name: &SessionName, auto_yes: bool) -> anyhow::Resu
     ).await;
 
     eprintln!("  {} Stale markers removed from session volume.", colored::Colorize::green("✓"));
+
+    // Also clean up any orphaned throwaway containers for this session
+    let removed = git_sandbox::gc_session_throwaway_containers(lc.docker_client(), name.as_str()).await?;
+    if !removed.is_empty() {
+        eprintln!("  {} Removed {} orphaned throwaway container(s).", colored::Colorize::green("✓"), removed.len());
+    }
+
+    Ok(())
+}
+
+/// Remove all orphaned throwaway containers across all sessions.
+async fn cmd_gc() -> anyhow::Result<()> {
+    let lc = lifecycle::Lifecycle::new()?;
+    let docker = lc.docker_client();
+
+    eprintln!("  Scanning for orphaned throwaway containers...");
+    let removed = git_sandbox::gc_throwaway_containers(docker).await?;
+
+    if removed.is_empty() {
+        eprintln!("  {} No orphaned containers found.", colored::Colorize::green("✓"));
+    } else {
+        for name in &removed {
+            eprintln!("  {} removed {}", colored::Colorize::green("✓"), name);
+        }
+        eprintln!("  {} Removed {} container(s).", colored::Colorize::green("✓"), removed.len());
+    }
+
+    // Also report volumes with no matching session metadata
+    let volumes = docker.list_volumes(None::<bollard::volume::ListVolumesOptions<String>>).await?;
+    let meta_dir = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".config/claude-container/sessions");
+
+    if let Some(vols) = &volumes.volumes {
+        let mut orphan_volumes = Vec::new();
+        for vol in vols {
+            if let Some(session_name) = vol.name.strip_prefix("claude-session-") {
+                // Check if this session has metadata or a container
+                let meta_path = meta_dir.join(format!("{}.env", session_name));
+                let container_name = format!("claude-session-ctr-{}", session_name);
+                let has_container = docker.inspect_container(&container_name, None).await.is_ok();
+
+                if !meta_path.exists() && !has_container {
+                    orphan_volumes.push(session_name.to_string());
+                }
+            }
+        }
+
+        if !orphan_volumes.is_empty() {
+            eprintln!();
+            eprintln!("  {} {} session volume(s) with no metadata or container:", colored::Colorize::yellow("⚠"), orphan_volumes.len());
+            for name in &orphan_volumes {
+                eprintln!("    {} {}", colored::Colorize::dimmed("·"), name);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Remove orphaned throwaway containers for a specific session.
+async fn cmd_session_gc(name: &SessionName) -> anyhow::Result<()> {
+    let lc = lifecycle::Lifecycle::new()?;
+    let docker = lc.docker_client();
+
+    eprintln!("  Scanning for throwaway containers in session '{}'...", name);
+    let removed = git_sandbox::gc_session_throwaway_containers(docker, name.as_str()).await?;
+
+    if removed.is_empty() {
+        eprintln!("  {} No orphaned containers found.", colored::Colorize::green("✓"));
+    } else {
+        for ctr_name in &removed {
+            eprintln!("  {} removed {}", colored::Colorize::green("✓"), ctr_name);
+        }
+        eprintln!("  {} Removed {} container(s).", colored::Colorize::green("✓"), removed.len());
+    }
+
     Ok(())
 }
 
@@ -970,10 +1105,15 @@ done
         Some(bollard::container::RemoveContainerOptions { force: true, ..Default::default() }),
     ).await;
 
+    let mut verify_labels = std::collections::HashMap::new();
+    verify_labels.insert(git_sandbox::THROWAWAY_LABEL.to_string(), "true".to_string());
+    verify_labels.insert(git_sandbox::SESSION_LABEL.to_string(), name.to_string());
+
     let config = bollard::container::Config {
         image: Some("alpine/git".to_string()),
         entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
         cmd: Some(vec![script]),
+        labels: Some(verify_labels),
         host_config: Some(bollard::models::HostConfig {
             binds: Some(binds),
             ..Default::default()
@@ -1072,11 +1212,16 @@ async fn cmd_session_fix(name: &SessionName, auto_yes: bool) -> anyhow::Result<(
         Some(bollard::container::RemoveContainerOptions { force: true, ..Default::default() }),
     ).await;
 
+    let mut fix_labels = std::collections::HashMap::new();
+    fix_labels.insert(git_sandbox::THROWAWAY_LABEL.to_string(), "true".to_string());
+    fix_labels.insert(git_sandbox::SESSION_LABEL.to_string(), name.to_string());
+
     let config = bollard::container::Config {
         image: Some("alpine/git".to_string()),
         user: Some("0:0".to_string()), // run as root to chown
         entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
         cmd: Some(vec![script]),
+        labels: Some(fix_labels),
         host_config: Some(bollard::models::HostConfig {
             binds: Some(binds),
             ..Default::default()
@@ -1156,10 +1301,15 @@ async fn cmd_session_set_dir(name: &SessionName, target: Option<&str>) -> anyhow
                 Some(bollard::container::RemoveContainerOptions { force: true, ..Default::default() }),
             ).await;
 
+            let mut setdir_labels = std::collections::HashMap::new();
+            setdir_labels.insert(git_sandbox::THROWAWAY_LABEL.to_string(), "true".to_string());
+            setdir_labels.insert(git_sandbox::SESSION_LABEL.to_string(), name.to_string());
+
             let config = bollard::container::Config {
                 image: Some("alpine/git".to_string()),
                 entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
                 cmd: Some(vec!["rm -f /session/.main-project".to_string()]),
+                labels: Some(setdir_labels),
                 host_config: Some(bollard::models::HostConfig {
                     binds: Some(vec![format!("{}:/session", volume)]),
                     ..Default::default()
@@ -1559,44 +1709,6 @@ fn collect_conflicts(
     }).collect()
 }
 
-/// Resolve auth token from env var or file.
-/// Shared between cmd_start, cmd_run, and offer_reconciliation.
-fn resolve_token() -> anyhow::Result<String> {
-    std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
-        .or_else(|_| {
-            let token_file = dirs::home_dir()
-                .unwrap_or_default()
-                .join(".config/claude-container/token");
-            std::fs::read_to_string(&token_file)
-        })
-        .map(|t| t.trim().to_string())
-        .map_err(|_| anyhow::anyhow!("No auth token found. Set CLAUDE_CODE_OAUTH_TOKEN or create ~/.config/claude-container/token"))
-}
-
-/// Build launch proofs: verify docker, image, volumes, and token.
-/// Shared pipeline used by cmd_start, cmd_run, and offer_reconciliation.
-async fn build_launch_proofs(
-    lc: &lifecycle::Lifecycle,
-    name: &SessionName,
-    image: &ImageRef,
-) -> anyhow::Result<(
-    types::verified::Verified<types::verified::DockerAvailable>,
-    types::verified::Verified<types::verified::ValidImage>,
-    types::verified::Verified<types::verified::VolumesReady>,
-    types::verified::Verified<types::verified::TokenReady>,
-)> {
-    let docker = container::verify_docker(lc).await?;
-    let verified_image = container::verify_image(lc, &docker, image).await?;
-    for tool in verified_image.validation.missing_optional() {
-        eprintln!("  {} {} (optional)", colored::Colorize::yellow("⚠"), tool);
-    }
-    let volumes = container::verify_volumes(lc, &docker, name).await?;
-    let token = resolve_token()?;
-    let verified_token = container::verify_token(lc, &token)?;
-
-    Ok((docker, verified_image, volumes, verified_token))
-}
-
 /// Offer agentic reconciliation: launch Claude to resolve merge conflicts.
 async fn offer_reconciliation(
     lc: &lifecycle::Lifecycle,
@@ -1630,10 +1742,21 @@ async fn offer_reconciliation(
         return Ok(());
     }
 
-    // Build verification proofs using shared pipeline
+    // Build verification proofs for container launch
+    let docker = container::verify_docker(lc).await?;
     let image_ref = ImageRef::new("ghcr.io/hypermemetic/claude-container:latest");
-    let (docker, verified_image, volumes, verified_token) =
-        build_launch_proofs(lc, name, &image_ref).await?;
+    let verified_image = container::verify_image(lc, &docker, &image_ref).await?;
+    let volumes = container::verify_volumes(lc, &docker, name).await?;
+
+    let token = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
+        .or_else(|_| {
+            let token_file = dirs::home_dir()
+                .unwrap_or_default()
+                .join(".config/claude-container/token");
+            std::fs::read_to_string(&token_file)
+        })
+        .map_err(|_| anyhow::anyhow!("No auth token"))?;
+    let verified_token = container::verify_token(lc, token.trim())?;
 
     let ready = types::verified::LaunchReady {
         docker,
@@ -1648,22 +1771,16 @@ async fn offer_reconciliation(
     eprintln!();
     std::io::stderr().flush().ok();
 
-    let reconcile_result = container::launch_reconciliation(
+    let reconciled = container::launch_reconciliation(
         lc, ready, name, &script_dir, conflicts,
     ).await?;
 
-    if let Some(description) = reconcile_result {
+    if let Some(desc) = reconciled {
         eprintln!();
-        if description.is_empty() {
-            eprintln!("  {} Reconciliation complete. Re-extracting...", colored::Colorize::green("✓"));
-        } else {
-            eprintln!("  {} Reconciliation complete: {}. Re-extracting...",
-                colored::Colorize::green("✓"), description);
-        }
+        eprintln!("  {} Reconciliation complete. Re-extracting...", colored::Colorize::green("✓"));
 
-        // Re-extract the resolved repos and verify each succeeds
+        // Re-extract the resolved repos
         let engine = sync::SyncEngine::new(lc.docker_client().clone());
-        let mut all_succeeded = true;
         for (repo_name, host_path, _) in conflicts {
             let session_branch = name.to_string();
             match engine.extract(name, repo_name, host_path, &session_branch).await {
@@ -1672,26 +1789,11 @@ async fn offer_reconciliation(
                     // Merge the resolved work
                     match engine.merge(host_path, &session_branch, branch, true) {
                         Ok(outcome) => eprintln!("    {} {} — {:?}", colored::Colorize::green("✓"), repo_name, outcome),
-                        Err(e) => {
-                            eprintln!("    {} {} — merge failed: {}", colored::Colorize::red("✗"), repo_name, e);
-                            all_succeeded = false;
-                        }
+                        Err(e) => eprintln!("    {} {} — merge failed: {}", colored::Colorize::red("✗"), repo_name, e),
                     }
                 }
-                Err(e) => {
-                    eprintln!("    {} {} — extract failed: {}", colored::Colorize::red("✗"), repo_name, e);
-                    all_succeeded = false;
-                }
+                Err(e) => eprintln!("    {} {} — extract failed: {}", colored::Colorize::red("✗"), repo_name, e),
             }
-        }
-
-        if all_succeeded {
-            eprintln!();
-            eprintln!("  {} All conflicts resolved and merged.", colored::Colorize::green("✓"));
-        } else {
-            eprintln!();
-            eprintln!("  {} Reconciliation partially failed. Some repos need manual attention.",
-                colored::Colorize::yellow("⚠"));
         }
     } else {
         eprintln!();
