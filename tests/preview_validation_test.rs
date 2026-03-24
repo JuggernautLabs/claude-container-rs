@@ -198,7 +198,7 @@ async fn test_render_sync_plan_for_review() {
     let plan = engine.plan_sync(&session, "main", &repo_paths).await.unwrap();
 
     println!("\n=== RENDERED SYNC PLAN (for human review) ===\n");
-    git_sandbox::render::sync_plan(&plan.action);
+    git_sandbox::render::sync_plan_directed(&plan.action, "status");
     println!("\n=== END RENDERED OUTPUT ===\n");
 
     // Print detailed breakdown for each non-skip repo

@@ -1836,3 +1836,215 @@ fn confirm(prompt: &str, auto_yes: bool) -> bool {
     std::io::stdin().read_line(&mut answer).ok();
     !answer.trim().to_lowercase().starts_with('n')
 }
+
+// ============================================================================
+// Unit tests for LaunchPath (runs without Docker)
+// ============================================================================
+
+#[cfg(test)]
+mod launch_path_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    // --- resolve_dockerfile tests ---
+
+    #[test]
+    fn create_new_carries_dockerfile() {
+        let df = tempfile::NamedTempFile::new().unwrap();
+        let df_path = df.path().to_path_buf();
+        let path = LaunchPath::CreateNew {
+            repos: vec![],
+            dockerfile: Some(df_path.clone()),
+            enable_docker: false,
+            as_root: false,
+        };
+        assert_eq!(path.resolve_dockerfile(&None), Some(df_path));
+    }
+
+    #[test]
+    fn create_new_without_dockerfile() {
+        let path = LaunchPath::CreateNew {
+            repos: vec![],
+            dockerfile: None,
+            enable_docker: false,
+            as_root: false,
+        };
+        assert_eq!(path.resolve_dockerfile(&None), None);
+    }
+
+    #[test]
+    fn resume_existing_carries_stored_dockerfile() {
+        let df = tempfile::NamedTempFile::new().unwrap();
+        let df_path = df.path().to_path_buf();
+        let path = LaunchPath::ResumeExisting {
+            dockerfile: Some(df_path.clone()),
+        };
+        assert_eq!(path.resolve_dockerfile(&None), Some(df_path));
+    }
+
+    #[test]
+    fn resume_existing_no_dockerfile_returns_none() {
+        let path = LaunchPath::ResumeExisting {
+            dockerfile: None,
+        };
+        assert_eq!(path.resolve_dockerfile(&None), None);
+    }
+
+    #[test]
+    fn attach_running_never_has_dockerfile() {
+        let path = LaunchPath::AttachRunning;
+        assert_eq!(path.resolve_dockerfile(&None), None);
+    }
+
+    #[test]
+    fn attach_running_ignores_cli_dockerfile_if_missing() {
+        // CLI override is Some but file doesn't exist on disk
+        let path = LaunchPath::AttachRunning;
+        let bogus = PathBuf::from("/nonexistent/Dockerfile");
+        assert_eq!(path.resolve_dockerfile(&Some(bogus)), None);
+    }
+
+    #[test]
+    fn cli_dockerfile_overrides_stored() {
+        let stored = tempfile::NamedTempFile::new().unwrap();
+        let cli = tempfile::NamedTempFile::new().unwrap();
+        let stored_path = stored.path().to_path_buf();
+        let cli_path = cli.path().to_path_buf();
+
+        let path = LaunchPath::ResumeExisting {
+            dockerfile: Some(stored_path.clone()),
+        };
+        let result = path.resolve_dockerfile(&Some(cli_path.clone()));
+        assert_eq!(result, Some(cli_path), "CLI should override stored");
+        assert_ne!(result, Some(stored_path), "Stored should not win");
+    }
+
+    #[test]
+    fn cli_dockerfile_overrides_auto_detect() {
+        let auto = tempfile::NamedTempFile::new().unwrap();
+        let cli = tempfile::NamedTempFile::new().unwrap();
+        let auto_path = auto.path().to_path_buf();
+        let cli_path = cli.path().to_path_buf();
+
+        let path = LaunchPath::CreateNew {
+            repos: vec![],
+            dockerfile: Some(auto_path.clone()),
+            enable_docker: false,
+            as_root: false,
+        };
+        let result = path.resolve_dockerfile(&Some(cli_path.clone()));
+        assert_eq!(result, Some(cli_path), "CLI should override auto-detect");
+        assert_ne!(result, Some(auto_path), "Auto-detect should not win");
+    }
+
+    #[test]
+    fn resume_never_uses_cwd_dockerfile() {
+        // Even if cwd has a Dockerfile, ResumeExisting doesn't pick it up
+        // (the type system prevents it — there's no auto-detect field)
+        let path = LaunchPath::ResumeExisting {
+            dockerfile: None,
+        };
+        // No CLI override either
+        assert_eq!(
+            path.resolve_dockerfile(&None),
+            None,
+            "ResumeExisting with no stored or CLI dockerfile must return None"
+        );
+    }
+
+    #[test]
+    fn cli_nonexistent_path_falls_through_to_stored() {
+        // CLI path exists but is empty string — falls through
+        let stored = tempfile::NamedTempFile::new().unwrap();
+        let stored_path = stored.path().to_path_buf();
+        let path = LaunchPath::ResumeExisting {
+            dockerfile: Some(stored_path.clone()),
+        };
+        let bogus = PathBuf::from("/nonexistent/Dockerfile");
+        assert_eq!(
+            path.resolve_dockerfile(&Some(bogus)),
+            Some(stored_path),
+            "Non-existent CLI path should fall through to stored"
+        );
+    }
+
+    #[test]
+    fn cli_empty_path_falls_through_to_stored() {
+        let stored = tempfile::NamedTempFile::new().unwrap();
+        let stored_path = stored.path().to_path_buf();
+        let path = LaunchPath::ResumeExisting {
+            dockerfile: Some(stored_path.clone()),
+        };
+        let empty = PathBuf::from("");
+        assert_eq!(
+            path.resolve_dockerfile(&Some(empty)),
+            Some(stored_path),
+            "Empty CLI path should fall through to stored"
+        );
+    }
+
+    // --- Compile-time type safety ---
+
+    #[test]
+    fn launch_path_variants_are_exhaustive() {
+        // If a new variant is added to LaunchPath, this match will fail to compile,
+        // forcing the developer to update this test (and presumably all other matches).
+        let path = LaunchPath::AttachRunning;
+        match path {
+            LaunchPath::CreateNew { repos, dockerfile, enable_docker, as_root } => {
+                let _ = (repos, dockerfile, enable_docker, as_root);
+            }
+            LaunchPath::ResumeExisting { dockerfile } => {
+                let _ = dockerfile;
+            }
+            LaunchPath::AttachRunning => {}
+        }
+    }
+
+    #[test]
+    fn create_new_fields_are_accessible() {
+        // Verify the type carries exactly the expected fields
+        let path = LaunchPath::CreateNew {
+            repos: vec![types::RepoConfig {
+                name: "test".into(),
+                host_path: PathBuf::from("/tmp/test"),
+                branch: Some("main".into()),
+            }],
+            dockerfile: Some(PathBuf::from("/tmp/Dockerfile")),
+            enable_docker: true,
+            as_root: false,
+        };
+        if let LaunchPath::CreateNew { repos, dockerfile, enable_docker, as_root } = path {
+            assert_eq!(repos.len(), 1);
+            assert_eq!(repos[0].name, "test");
+            assert!(dockerfile.is_some());
+            assert!(enable_docker);
+            assert!(!as_root);
+        } else {
+            panic!("Expected CreateNew");
+        }
+    }
+
+    #[test]
+    fn resume_existing_only_carries_dockerfile() {
+        // ResumeExisting intentionally does NOT carry repos, enable_docker, or as_root.
+        // This is the key design decision: you can't accidentally re-clone or change
+        // Docker-in-Docker settings on resume.
+        let path = LaunchPath::ResumeExisting {
+            dockerfile: None,
+        };
+        if let LaunchPath::ResumeExisting { dockerfile } = path {
+            assert!(dockerfile.is_none());
+        } else {
+            panic!("Expected ResumeExisting");
+        }
+    }
+
+    #[test]
+    fn attach_running_is_unit_variant() {
+        // AttachRunning carries no data — there's nothing to configure when
+        // attaching to an already-running container.
+        let path = LaunchPath::AttachRunning;
+        assert!(matches!(path, LaunchPath::AttachRunning));
+    }
+}
