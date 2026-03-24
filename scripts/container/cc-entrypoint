@@ -74,7 +74,7 @@ HOST_UID="${HOST_UID:-1000}"
 if [[ "${RUN_AS_USER:-}" == "1" ]] || [[ "${RUN_AS_ROOTISH:-}" == "1" ]]; then
     groupadd -g $DEV_GID developer 2>/dev/null || true
     useradd -u $HOST_UID -g $DEV_GID -m -s /bin/bash developer 2>/dev/null || true
-    chown developer:developer /workspace 2>/dev/null || true
+    chown -R developer:developer /workspace 2>/dev/null || true
     # Fix volume mount ownership — Docker creates volume roots as root.
     # Recursively fix /home/developer to catch all volume mounts and caches
     # (.claude, .cargo, .npm, .cache, .cabal, .ghcup, .local, etc.)

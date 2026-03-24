@@ -1067,6 +1067,7 @@ echo "BUNDLE_OK"
 
         let script = format!(
             r#"
+export HOME=/tmp
 git config --global --add safe.directory "*"
 git clone {branch_flag} "/upstream" "/session/{repo_name}" || exit 1
 cd "/session/{repo_name}" || exit 1
@@ -1076,8 +1077,13 @@ echo "Cloned $(git rev-parse --short HEAD) on $(git symbolic-ref --short HEAD 2>
             repo_name = repo_name,
         );
 
+        // Run clone as host UID so files are owned by the developer user
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+
         let config = ContainerConfig {
             image: Some(GIT_UTIL_IMAGE.to_string()),
+            user: Some(format!("{}:{}", uid, gid)),
             entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
             cmd: Some(vec![script]),
             host_config: Some(bollard::models::HostConfig {
@@ -1168,8 +1174,12 @@ echo "Cloned $(git rev-parse --short HEAD) on $(git symbolic-ref --short HEAD 2>
             Some(RemoveContainerOptions { force: true, ..Default::default() }),
         ).await;
 
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+
         let config = ContainerConfig {
             image: Some(GIT_UTIL_IMAGE.to_string()),
+            user: Some(format!("{}:{}", uid, gid)),
             entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
             cmd: Some(vec![format!("echo '{}' > /session/.main-project", main_project)]),
             host_config: Some(bollard::models::HostConfig {
