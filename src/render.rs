@@ -127,17 +127,18 @@ pub fn sync_plan_directed(plan: &SessionSyncPlan, direction: &str) {
         "sync" => format!("sync: {} ↔ {}", plan.session_name, plan.target_branch),
         _ => format!("pull: {} → {}", plan.session_name, plan.target_branch),
     };
-    sync_plan_inner(plan, &label);
+    sync_plan_inner(plan, &label, direction);
 }
 
-fn sync_plan_inner(plan: &SessionSyncPlan, label: &str) {
+fn sync_plan_inner(plan: &SessionSyncPlan, label: &str, direction: &str) {
     rule(Some(label));
+    let is_push = direction == "push";
 
-    // Classify actions into groups
-    let mut ready: Vec<&RepoSyncAction> = Vec::new();       // clean pull/clone
-    let mut pending_merge: Vec<&RepoSyncAction> = Vec::new(); // session branch ahead of target
-    let mut diverged: Vec<&RepoSyncAction> = Vec::new();    // both sides changed
-    let mut skipped: Vec<&RepoSyncAction> = Vec::new();     // push direction
+    // Classify actions into groups — direction-aware
+    let mut ready: Vec<&RepoSyncAction> = Vec::new();
+    let mut pending_merge: Vec<&RepoSyncAction> = Vec::new();
+    let mut diverged: Vec<&RepoSyncAction> = Vec::new();
+    let mut skipped: Vec<&RepoSyncAction> = Vec::new();
     let mut blocked: Vec<&RepoSyncAction> = Vec::new();
     let mut unchanged = 0u32;
 
@@ -145,16 +146,16 @@ fn sync_plan_inner(plan: &SessionSyncPlan, label: &str) {
         match &action.decision {
             SyncDecision::Skip { .. } => unchanged += 1,
             SyncDecision::Pull { .. } | SyncDecision::CloneToHost => {
-                ready.push(action);
+                if is_push { unchanged += 1; } else { ready.push(action); }
             }
             SyncDecision::Push { .. } | SyncDecision::PushToContainer => {
-                skipped.push(action);
+                if is_push { ready.push(action); } else { skipped.push(action); }
             }
             SyncDecision::Reconcile { .. } => {
                 diverged.push(action);
             }
             SyncDecision::MergeToTarget { .. } => {
-                pending_merge.push(action);
+                if is_push { unchanged += 1; } else { pending_merge.push(action); }
             }
             SyncDecision::Blocked { .. } => blocked.push(action),
         }
@@ -186,6 +187,8 @@ fn sync_plan_inner(plan: &SessionSyncPlan, label: &str) {
         let desc = match &action.decision {
             SyncDecision::Pull { commits } => format!("squash-merge {} commit(s) into {}", commits, plan.target_branch),
             SyncDecision::CloneToHost => "first extract".into(),
+            SyncDecision::Push { commits } => format!("{} host commit(s) → container", commits),
+            SyncDecision::PushToContainer => "push to container".into(),
             _ => String::new(),
         };
         println!("  {} {} — {}", "✓".green(), name, desc);

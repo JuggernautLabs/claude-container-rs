@@ -178,10 +178,19 @@ _inject_claude_md() {
             ;;
     esac
 
-    # Write CLAUDE.md to workspace root (don't overwrite existing user CLAUDE.md)
-    if [[ ! -f /workspace/CLAUDE.md ]]; then
-        echo "$claude_md" > /workspace/CLAUDE.md 2>/dev/null || true
-    fi
+    # Write CLAUDE.md to workspace root.
+    # For conflict/rebase resolution: ALWAYS overwrite — the instructions are critical.
+    # For normal work: don't overwrite existing user CLAUDE.md.
+    case "$task" in
+        resolve-conflicts|rebase-conflicts)
+            echo "$claude_md" > /workspace/CLAUDE.md 2>/dev/null || true
+            ;;
+        *)
+            if [[ ! -f /workspace/CLAUDE.md ]]; then
+                echo "$claude_md" > /workspace/CLAUDE.md 2>/dev/null || true
+            fi
+            ;;
+    esac
 }
 
 # Only inject CLAUDE.md when AGENT_TASK is set
