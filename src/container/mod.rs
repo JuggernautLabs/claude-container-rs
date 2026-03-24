@@ -296,8 +296,17 @@ pub fn restore_terminal() {
     // 1. Disable crossterm raw mode (safe even if never enabled)
     let _ = terminal::disable_raw_mode();
 
-    // 2. Show cursor
-    print!("\x1b[?25h");
+    // 2. Show cursor + disable mouse tracking + disable bracketed paste + disable focus events
+    // Claude Code enables these for its TUI; we must undo them on detach
+    print!(concat!(
+        "\x1b[?25h",     // show cursor
+        "\x1b[?1000l",   // disable mouse click tracking
+        "\x1b[?1002l",   // disable mouse drag tracking
+        "\x1b[?1003l",   // disable mouse all-motion tracking
+        "\x1b[?1006l",   // disable SGR mouse mode
+        "\x1b[?2004l",   // disable bracketed paste
+        "\x1b[?1004l",   // disable focus events
+    ));
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
     // 3. Restore termios flags
