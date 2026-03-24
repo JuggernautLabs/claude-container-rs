@@ -550,7 +550,9 @@ async fn cmd_start(
     // Step 2: Resolve image — use provided dockerfile, or fall back to session metadata
     let effective_dockerfile = dockerfile.clone().or_else(|| {
         let sm2 = session::SessionManager::new(lc.docker_client().clone());
-        sm2.load_metadata(name).and_then(|m| m.dockerfile)
+        sm2.load_metadata(name)
+            .and_then(|m| m.dockerfile)
+            .filter(|df| !df.as_os_str().is_empty() && df.exists())
     });
 
     let image = if let Some(ref df) = effective_dockerfile {

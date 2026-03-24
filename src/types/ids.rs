@@ -84,6 +84,10 @@ impl fmt::Display for VolumeName {
 pub struct ContainerName(String);
 
 impl ContainerName {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }

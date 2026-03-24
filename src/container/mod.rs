@@ -397,12 +397,8 @@ fn terminal_size() -> (u16, u16) {
 /// on return (including on panic, via Drop guard).
 /// Launch a reconciliation container: Claude resolves merge conflicts interactively.
 ///
-/// The container is created/rebuilt with:
-///   - AGENT_TASK=resolve-conflicts
-///   - Host repos bind-mounted read-only at /host/<repo>
-///   - Conflict summary injected via AGENT_CONTEXT
-///   - Claude sees CLAUDE.md with conflict details
-///   - User interacts until Claude calls `fin "description"`
+/// Uses a SEPARATE container name (claude-reconcile-ctr-{session}) to avoid
+/// killing any running session container. Shares the same session volumes.
 ///
 /// Returns Some(description) if reconciliation completed, None if Claude exited without finishing.
 pub async fn launch_reconciliation(
@@ -410,12 +406,28 @@ pub async fn launch_reconciliation(
     ready: LaunchReady,
     session_name: &SessionName,
     script_dir: &Path,
-    conflict_repos: &[(String, std::path::PathBuf, Vec<String>)], // (name, host_path, conflict_files)
+    conflict_repos: &[(String, std::path::PathBuf, Vec<String>)],
 ) -> Result<Option<String>, ContainerError> {
-    let container_name = session_name.container_name();
+    let session_ctr = session_name.container_name();
+    let reconcile_ctr = ContainerName::new(format!("claude-reconcile-ctr-{}", session_name));
 
-    // Remove existing container — reconciliation always gets a fresh one
-    let _ = lc.remove_container(&container_name).await;
+    // Check if session container is running — must stop it to avoid
+    // two containers writing to the same volume simultaneously
+    match lc.inspect_container(&session_ctr).await? {
+        crate::types::docker::ContainerState::Running { .. } => {
+            eprintln!("  {} Stopping running session container...", colored::Colorize::yellow("⚠"));
+            let docker = lc.docker_client();
+            docker.stop_container(
+                session_ctr.as_str(),
+                Some(bollard::container::StopContainerOptions { t: 10 }),
+            ).await?;
+            eprintln!("  Stopped. Will restart after reconciliation.");
+        }
+        _ => {}
+    }
+
+    // Clean up any leftover reconciliation container
+    let _ = lc.remove_container(&reconcile_ctr).await;
 
     let mut args = build_create_args(&ready, session_name, script_dir, &LaunchOptions::default());
 
@@ -433,7 +445,6 @@ pub async fn launch_reconciliation(
     }
     summary.push_str("Resolve all conflicts, commit, then run: fin \"<description>\"\n");
 
-    // Base64-encode the context for AGENT_CONTEXT env var
     let context_b64 = base64_encode(&summary);
     args.env.push(format!("AGENT_CONTEXT={}", context_b64));
 
@@ -446,19 +457,31 @@ pub async fn launch_reconciliation(
         ));
     }
 
-    // Create, start, attach
-    lc.create_container(&container_name, &ready.image.image, args).await?;
-    lc.start_container(&container_name).await?;
+    // Create reconciliation container (separate name, same volumes)
+    lc.create_container(&reconcile_ctr, &ready.image.image, args).await?;
+    lc.start_container(&reconcile_ctr).await?;
 
     eprintln!("  Launching Claude for conflict resolution...");
     eprintln!();
     use std::io::Write;
     std::io::stderr().flush().ok();
 
-    attach_container(lc, &container_name, false).await?;
+    attach_container(lc, &reconcile_ctr, false).await?;
 
-    // After Claude exits, check for .reconcile-complete marker
+    // Clean up reconciliation container
+    let _ = lc.remove_container(&reconcile_ctr).await;
+
+    // Check for .reconcile-complete marker
     let check = check_reconcile_complete(lc, session_name).await;
+
+    if check.is_some() {
+        eprintln!("  {} Reconciliation complete.", colored::Colorize::green("✓"));
+        eprintln!("  Run `git-sandbox start -s {}` to resume your session.", session_name);
+    } else {
+        eprintln!("  {} Exited without completing reconciliation.", colored::Colorize::yellow("⚠"));
+        eprintln!("  Session container was stopped. Run `git-sandbox start -s {}` to resume.", session_name);
+    }
+
     Ok(check)
 }
 
