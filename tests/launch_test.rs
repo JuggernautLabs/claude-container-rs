@@ -1,10 +1,10 @@
 //! Launch tests — verify the container actually starts and the entrypoint runs.
 //! Does NOT interact with Claude — creates, starts, verifies, kills.
 
-use claude_container::lifecycle::Lifecycle;
-use claude_container::session::SessionManager;
-use claude_container::types::*;
-use claude_container::container;
+use git_sandbox::lifecycle::Lifecycle;
+use git_sandbox::session::SessionManager;
+use git_sandbox::types::*;
+use git_sandbox::container;
 use std::path::PathBuf;
 
 fn ensure_docker_host() {
@@ -19,14 +19,7 @@ fn ensure_docker_host() {
 }
 
 fn find_script_dir() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_default();
-    let candidates = [
-        home.join("dev/controlflow/juggernautlabs/claude-container"),
-        home.join(".local/share/claude-container"),
-    ];
-    candidates.into_iter()
-        .find(|p| p.join("lib/container/cc-entrypoint").exists())
-        .expect("Can't find claude-container script dir with cc-entrypoint")
+    git_sandbox::scripts::materialize().expect("materialize scripts")
 }
 
 /// Test the full verified pipeline up to launch — create a test container,
@@ -117,23 +110,19 @@ fn test_verified_types_enforce_ordering() {
     // This test passes by existing — it verifies the API surface is correct.
 }
 
-/// Test that entrypoint scripts exist at the expected path in the script dir.
-/// This is the root cause of "cc-entrypoint: No such file or directory" —
-/// if the path is wrong, the bind mount won't find the file.
+/// Test that embedded scripts are materialized correctly.
 #[test]
-fn test_entrypoint_scripts_exist_on_host() {
-    let script_dir = find_script_dir();
-    let container_scripts_dir = script_dir.join("lib/container");
+fn test_entrypoint_scripts_materialize() {
+    let scripts_dir = find_script_dir();
 
     for script in &["cc-entrypoint", "cc-developer-setup", "cc-agent-run"] {
-        let path = container_scripts_dir.join(script);
+        let path = scripts_dir.join(script);
         assert!(
             path.exists(),
-            "Script '{}' should exist at {}. The container mount will fail without it.",
+            "Script '{}' should exist at {}",
             script,
             path.display()
         );
-        // Also check it's executable
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -147,13 +136,6 @@ fn test_entrypoint_scripts_exist_on_host() {
         }
     }
 
-    // Verify the build_create_args code uses lib/container/ subdirectory, not root
-    // (This is the bug we're testing for — the rust code was joining script_dir + "cc-entrypoint"
-    //  instead of script_dir + "lib/container/cc-entrypoint")
-    let wrong_path = script_dir.join("cc-entrypoint");
-    assert!(
-        !wrong_path.exists(),
-        "cc-entrypoint should NOT exist at repo root {}. It should be at lib/container/cc-entrypoint.",
-        wrong_path.display()
-    );
+    // Verify content matches what's embedded
+    assert!(git_sandbox::scripts::scripts_are_current(&scripts_dir));
 }

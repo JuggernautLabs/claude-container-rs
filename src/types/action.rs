@@ -69,10 +69,18 @@ impl<A: Action> fmt::Display for Plan<A> {
 #[derive(Debug)]
 pub struct RepoSyncAction {
     pub repo_name: String,
+    /// Host path for this repo (for display as relative path)
+    pub host_path: Option<std::path::PathBuf>,
     pub decision: super::git::SyncDecision,
     /// What the diff would look like (precomputed at preview time)
     pub outbound_diff: Option<DiffSummary>,
     pub inbound_diff: Option<DiffSummary>,
+    /// Trial merge result: None = not tested, Some(empty) = clean, Some(files) = conflicts
+    pub trial_conflicts: Option<Vec<String>>,
+    /// Session branch is ahead of target by N commits (needs merge even if container unchanged)
+    pub session_ahead_of_target: u32,
+    /// Diff from target to session branch (the pending merge)
+    pub session_to_target_diff: Option<DiffSummary>,
 }
 
 /// A sync plan for the entire session
@@ -301,6 +309,24 @@ pub struct DiffSummary {
     pub files_changed: u32,
     pub insertions: u32,
     pub deletions: u32,
+    pub files: Vec<FileDiff>,
+}
+
+/// Per-file diff entry
+#[derive(Debug, Clone)]
+pub struct FileDiff {
+    pub path: String,
+    pub status: FileStatus,
+    pub insertions: u32,
+    pub deletions: u32,
+}
+
+#[derive(Debug, Clone)]
+pub enum FileStatus {
+    Added,
+    Modified,
+    Deleted,
+    Renamed(String), // old path
 }
 
 impl fmt::Display for DiffSummary {
@@ -336,7 +362,9 @@ impl Action for ContainerPlan {
     }
 
     fn execute(self) -> Result<Self::Result, Self::Error> {
-        // TODO: execute container lifecycle actions
-        unimplemented!("ContainerPlan::execute not yet implemented")
+        // Container lifecycle is async — use Lifecycle methods directly.
+        Err(super::ContainerError::NonInteractive(
+            "ContainerPlan::execute() requires async. Use Lifecycle::create_container/start_container directly.".into()
+        ))
     }
 }

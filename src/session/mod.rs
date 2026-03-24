@@ -472,6 +472,62 @@ impl SessionManager {
         Ok(Some(config))
     }
 
+    /// Write session config (.claude-projects.yml) into the session volume.
+    pub async fn write_config(
+        &self,
+        name: &SessionName,
+        config: &SessionConfig,
+    ) -> Result<(), crate::types::ContainerError> {
+        let volume_name = name.session_volume();
+        let yaml = serde_yaml::to_string(config)?;
+
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() % 0xFFFFFF;
+        let container_label = format!("cc-wcfg-{}-{:x}", name.as_str(), suffix);
+
+        let _ = self.docker.remove_container(
+            &container_label,
+            Some(bollard::container::RemoveContainerOptions { force: true, ..Default::default() }),
+        ).await;
+
+        // Write via shell — pass yaml as env var to avoid quoting issues
+        let escaped = yaml.replace('\'', "'\\''");
+        let script = format!("echo '{}' > /session/.claude-projects.yml", escaped);
+
+        let cfg = bollard::container::Config {
+            image: Some("alpine:latest".to_string()),
+            entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
+            cmd: Some(vec![script]),
+            host_config: Some(bollard::models::HostConfig {
+                binds: Some(vec![format!("{}:/session", volume_name)]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        self.docker.create_container(
+            Some(bollard::container::CreateContainerOptions { name: container_label.as_str(), platform: None }),
+            cfg,
+        ).await?;
+
+        self.docker.start_container::<String>(&container_label, None).await?;
+
+        let mut wait = self.docker.wait_container(
+            &container_label,
+            Some(bollard::container::WaitContainerOptions { condition: "not-running" }),
+        );
+        while let Some(_) = wait.next().await {}
+
+        let _ = self.docker.remove_container(
+            &container_label,
+            Some(bollard::container::RemoveContainerOptions { force: true, ..Default::default() }),
+        ).await;
+
+        Ok(())
+    }
+
     // ========================================================================
     // Repo discovery (host filesystem)
     // ========================================================================
@@ -481,6 +537,11 @@ impl SessionManager {
     /// Skips worktrees (where `.git` is a file, not a directory).
     pub fn discover_repos(&self, dir: &Path) -> Vec<RepoConfig> {
         let mut repos = Vec::new();
+
+        // Use the directory name as prefix (e.g. "hypermemetic" from /path/to/hypermemetic/)
+        let prefix = dir.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
 
         let entries = match std::fs::read_dir(dir) {
             Ok(entries) => entries,
@@ -501,10 +562,17 @@ impl SessionManager {
             }
 
             if git_dir.is_dir() {
-                let name = path
+                let leaf = path
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
+
+                // Name with prefix (e.g. "hypermemetic/synapse") for config compat
+                let name = if prefix.is_empty() {
+                    leaf
+                } else {
+                    format!("{}/{}", prefix, leaf)
+                };
 
                 // Detect current branch
                 let branch = git2::Repository::open(&path)

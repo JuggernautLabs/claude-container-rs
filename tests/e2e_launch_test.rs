@@ -24,14 +24,7 @@ fn docker() -> Docker {
 }
 
 fn script_dir() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_default();
-    let candidates = [
-        home.join("dev/controlflow/juggernautlabs/claude-container"),
-        home.join(".local/share/claude-container"),
-    ];
-    candidates.into_iter()
-        .find(|p| p.join("lib/container/cc-entrypoint").exists())
-        .expect("Can't find script dir with lib/container/cc-entrypoint")
+    git_sandbox::scripts::materialize().expect("materialize scripts")
 }
 
 fn token() -> String {
@@ -61,8 +54,7 @@ async fn run_in_container(
     // Clean up any leftover
     let _ = docker.remove_container(name, Some(RemoveContainerOptions { force: true, ..Default::default() })).await;
 
-    let sd = script_dir();
-    let scripts_dir = sd.join("lib/container");
+    let scripts_dir = script_dir();
 
     let mut binds = vec![
         format!("{}:/usr/local/bin/cc-entrypoint:ro", scripts_dir.join("cc-entrypoint").display()),
@@ -300,8 +292,7 @@ async fn test_stale_detection_correct_container_passes() {
     use bollard::container::{Config, CreateContainerOptions, RemoveContainerOptions};
 
     let d = docker();
-    let sd = script_dir();
-    let scripts_dir = sd.join("lib/container");
+    let scripts_dir = script_dir();
     let test_name = format!("e2e-stale-test-{}", std::process::id());
 
     // Clean up leftover
@@ -344,4 +335,54 @@ async fn test_stale_detection_correct_container_passes() {
 
     // Clean up
     let _ = d.remove_container(&test_name, Some(RemoveContainerOptions { force: true, ..Default::default() })).await;
+}
+
+/// Test that pre-launch output is clean — no garbled lines from raw mode.
+/// Runs start against a running container (which returns immediately)
+/// and verifies each line starts at column 0.
+#[tokio::test]
+#[ignore]
+async fn test_output_formatting_clean() {
+    use std::process::Command;
+
+    let binary = std::env::current_exe().unwrap()
+        .parent().unwrap().parent().unwrap()
+        .join("debug/git-sandbox");
+
+    // If binary doesn't exist, try release
+    let binary = if binary.exists() { binary } else {
+        PathBuf::from(std::env::var("HOME").unwrap()).join(".cargo/bin/git-sandbox")
+    };
+
+    // Run against synapse-cc-ux (known running container) — should return quickly
+    // Inherit DOCKER_HOST and pass token
+    let output = Command::new(&binary)
+        .args(["start", "-s", "synapse-cc-ux"])
+        .env("TERM", "xterm-256color")
+        .env("DOCKER_HOST", std::env::var("DOCKER_HOST").unwrap_or_default())
+        .output()
+        .expect("failed to run git-sandbox");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    println!("=== stderr ===\n{}\n=== end ===", stderr);
+
+    // Each line should start at column 0 (no staircase effect from missing \r)
+    // In a garbled output, line N starts at the end of line N-1
+    let lines: Vec<&str> = stderr.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        // Check for the staircase pattern: lots of leading spaces
+        // A properly formatted line should have at most 2-4 leading spaces (indentation)
+        let leading_spaces = line.len() - line.trim_start().len();
+        assert!(
+            leading_spaces < 20,
+            "Line {} has {} leading spaces (garbled output?): '{}'",
+            i, leading_spaces, line
+        );
+    }
+
+    // Should contain our session name
+    assert!(
+        stderr.contains("synapse-cc-ux"),
+        "Output should mention the session name"
+    );
 }

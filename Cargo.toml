@@ -26,6 +26,10 @@ dirs = "6"
 tempfile = "3"
 # Git
 git2 = "0.19"
+# Regex for --filter
+regex = "1"
+# Relative paths for display
+pathdiff = "0.2"
 # Colors
 colored = "3"
 # SHA hashing (for cache keys)

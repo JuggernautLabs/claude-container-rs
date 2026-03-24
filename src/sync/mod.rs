@@ -272,11 +272,60 @@ impl SyncEngine {
                 _ => (None, None),
             };
 
+            // Trial merge for Pull/Reconcile: detect conflicts without touching disk
+            let trial_conflicts = match &decision {
+                SyncDecision::Pull { .. } | SyncDecision::Reconcile { .. } => {
+                    // ours = target branch HEAD on host, theirs = container HEAD
+                    match (pair.host.head(), pair.container.head()) {
+                        (Some(ours), Some(theirs)) => {
+                            self.trial_merge(&host_path, ours, theirs)
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+
+            // Check if session branch is ahead of target (pending merge)
+            let session_name_str = session.to_string();
+            let (session_ahead_of_target, session_to_target_diff) = if !target_branch.is_empty() {
+                match Repository::open(&host_path) {
+                    Ok(repo) => {
+                        let session_ref = format!("refs/heads/{}", session_name_str);
+                        let target_ref = format!("refs/heads/{}", target_branch);
+                        let session_oid = repo.find_reference(&session_ref).ok()
+                            .and_then(|r| r.peel_to_commit().ok()).map(|c| c.id());
+                        let target_oid = repo.find_reference(&target_ref).ok()
+                            .and_then(|r| r.peel_to_commit().ok()).map(|c| c.id());
+                        match (session_oid, target_oid) {
+                            (Some(s), Some(t)) if s != t => {
+                                let ahead = repo.graph_ahead_behind(s, t)
+                                    .map(|(a, _)| a as u32).unwrap_or(0);
+                                let diff = if ahead > 0 {
+                                    let s_hash = CommitHash::new(s.to_string());
+                                    let t_hash = CommitHash::new(t.to_string());
+                                    self.compute_diff(&host_path, &t_hash, &s_hash)
+                                } else { None };
+                                (ahead, diff)
+                            }
+                            _ => (0, None),
+                        }
+                    }
+                    Err(_) => (0, None),
+                }
+            } else {
+                (0, None)
+            };
+
             repo_actions.push(RepoSyncAction {
                 repo_name: vr.name.clone(),
+                host_path: Some(host_path.clone()),
                 decision,
                 outbound_diff,
                 inbound_diff,
+                trial_conflicts,
+                session_ahead_of_target,
+                session_to_target_diff,
             });
         }
 
@@ -297,6 +346,54 @@ impl SyncEngine {
     }
 
     // ========================================================================
+    // Trial merge: in-memory, zero side effects
+    // ========================================================================
+
+    /// Perform an in-memory trial merge to detect conflicts without touching
+    /// the working directory, index, or any refs. Uses git2::merge_trees()
+    /// which operates purely on git objects — safe even on crash.
+    ///
+    /// Returns None if either commit isn't available locally, or Some with
+    /// the list of conflicting file paths (empty = clean merge).
+    pub fn trial_merge(
+        &self,
+        host_path: &Path,
+        ours_hash: &CommitHash,
+        theirs_hash: &CommitHash,
+    ) -> Option<Vec<String>> {
+        let repo = Repository::open(host_path).ok()?;
+        let ours_oid = git2::Oid::from_str(ours_hash.as_str()).ok()?;
+        let theirs_oid = git2::Oid::from_str(theirs_hash.as_str()).ok()?;
+
+        let ours_commit = repo.find_commit(ours_oid).ok()?;
+        let theirs_commit = repo.find_commit(theirs_oid).ok()?;
+
+        let merge_base_oid = repo.merge_base(ours_oid, theirs_oid).ok()?;
+        let base_commit = repo.find_commit(merge_base_oid).ok()?;
+
+        let base_tree = base_commit.tree().ok()?;
+        let ours_tree = ours_commit.tree().ok()?;
+        let theirs_tree = theirs_commit.tree().ok()?;
+
+        let mut merge_opts = git2::MergeOptions::new();
+        let index = repo.merge_trees(&base_tree, &ours_tree, &theirs_tree, Some(&mut merge_opts)).ok()?;
+
+        if index.has_conflicts() {
+            let conflicts: Vec<String> = index
+                .conflicts().ok()?
+                .filter_map(|c| c.ok())
+                .filter_map(|c| {
+                    c.our.or(c.their).or(c.ancestor)
+                        .and_then(|entry| String::from_utf8(entry.path).ok())
+                })
+                .collect();
+            Some(conflicts)
+        } else {
+            Some(vec![]) // clean merge
+        }
+    }
+
+    // ========================================================================
     // Diff: squash-aware diff between two refs
     // ========================================================================
 
@@ -308,6 +405,8 @@ impl SyncEngine {
         from: &CommitHash,
         to: &CommitHash,
     ) -> Option<DiffSummary> {
+        use crate::types::action::{FileDiff, FileStatus};
+
         let repo = Repository::open(repo_path).ok()?;
 
         let from_oid = git2::Oid::from_str(from.as_str()).ok()?;
@@ -324,10 +423,50 @@ impl SyncEngine {
             .ok()?;
         let stats = diff.stats().ok()?;
 
+        // Collect per-file diffs
+        let mut files = Vec::new();
+        let num_deltas = diff.deltas().len();
+        for i in 0..num_deltas {
+            let delta = diff.get_delta(i).unwrap();
+            let path = delta.new_file().path()
+                .or_else(|| delta.old_file().path())
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| "?".into());
+
+            let status = match delta.status() {
+                git2::Delta::Added => FileStatus::Added,
+                git2::Delta::Deleted => FileStatus::Deleted,
+                git2::Delta::Renamed => {
+                    let old = delta.old_file().path()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    FileStatus::Renamed(old)
+                }
+                _ => FileStatus::Modified,
+            };
+
+            // Per-file line counts via Patch
+            let (ins, del) = git2::Patch::from_diff(&diff, i).ok()
+                .flatten()
+                .map(|patch| {
+                    let (_, i, d) = patch.line_stats().unwrap_or((0, 0, 0));
+                    (i as u32, d as u32)
+                })
+                .unwrap_or((0, 0));
+
+            files.push(FileDiff {
+                path,
+                status,
+                insertions: ins,
+                deletions: del,
+            });
+        }
+
         Some(DiffSummary {
             files_changed: stats.files_changed() as u32,
             insertions: stats.insertions() as u32,
             deletions: stats.deletions() as u32,
+            files,
         })
     }
 
@@ -416,7 +555,7 @@ impl SyncEngine {
         let ancestry = self.check_ancestry(repo_path, c_head, h_head);
         let content = compute_content_comparison(repo, c_head, h_head);
         let squash = read_squash_state(repo, session_name, c_head);
-        let target_ahead = TargetAheadKind::NotAhead; // TODO: full target-ahead analysis
+        let target_ahead = compute_target_ahead(repo, session_name, &ancestry, &squash);
 
         PairRelation {
             ancestry,
@@ -444,8 +583,15 @@ impl SyncEngine {
     ) -> Result<ExtractResult, ContainerError> {
         let volume_name = session.session_volume();
 
-        // Create a temp dir on the host to receive the bundle
-        let bundle_dir = tempfile::tempdir().map_err(|e| ContainerError::Io(e))?;
+        // Create a temp dir on the host to receive the bundle.
+        // MUST be under $HOME — Colima/Docker Desktop only mount user dirs,
+        // not /var/folders or /tmp which are macOS-specific.
+        let bundle_base = dirs::cache_dir()
+            .or_else(|| dirs::home_dir().map(|h| h.join(".cache")))
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+            .join("git-sandbox/bundles");
+        std::fs::create_dir_all(&bundle_base).map_err(|e| ContainerError::Io(e))?;
+        let bundle_dir = tempfile::tempdir_in(&bundle_base).map_err(|e| ContainerError::Io(e))?;
         let bundle_host_path = bundle_dir.path().join("repo.bundle");
 
         let container_name = format!("cc-extract-{}-{}", session, rand_suffix());
@@ -455,11 +601,16 @@ impl SyncEngine {
         ).await;
 
         // Script: cd into the repo inside /session, create bundle
+        // Use --all to bundle everything (handles detached HEAD, any branch)
         let script = format!(
             r#"
+set -e
 git config --global --add safe.directory "*"
-cd "/session/{repo_name}" || exit 1
-git bundle create /bundles/repo.bundle HEAD 2>&1
+cd "/session/{repo_name}" || {{ echo "FAIL: repo not found at /session/{repo_name}"; exit 1; }}
+echo "HEAD=$(git rev-parse HEAD)"
+echo "branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo detached)"
+git bundle create /bundles/repo.bundle --all 2>&1
+echo "BUNDLE_OK"
 "#,
             repo_name = repo_name,
         );
@@ -509,6 +660,23 @@ git bundle create /bundles/repo.bundle HEAD 2>&1
             }
         }
 
+        // Collect logs for diagnostics
+        let mut log_output = String::new();
+        let mut log_stream = self.docker.logs(
+            &container_name,
+            Some(LogsOptions::<String> {
+                stdout: true,
+                stderr: true,
+                follow: false,
+                ..Default::default()
+            }),
+        );
+        while let Some(chunk) = log_stream.next().await {
+            if let Ok(output) = chunk {
+                log_output.push_str(&output.to_string());
+            }
+        }
+
         // Clean up the container
         let _ = self.docker.remove_container(
             &container_name,
@@ -518,7 +686,7 @@ git bundle create /bundles/repo.bundle HEAD 2>&1
         if exit_code != 0 {
             return Err(ContainerError::ExtractionFailed {
                 repo: repo_name.to_string(),
-                reason: format!("git bundle create exited with code {}", exit_code),
+                reason: format!("git bundle exited {}: {}", exit_code, log_output.lines().last().unwrap_or("unknown")),
             });
         }
 
@@ -526,25 +694,43 @@ git bundle create /bundles/repo.bundle HEAD 2>&1
         if !bundle_host_path.exists() {
             return Err(ContainerError::ExtractionFailed {
                 repo: repo_name.to_string(),
-                reason: "bundle file was not created".to_string(),
+                reason: format!("bundle file not created. Container output:\n{}", log_output),
             });
         }
 
-        // On the host: open the repo and fetch from the bundle
+        // On the host: fetch from the bundle using git CLI (more reliable than libgit2 for bundles)
         let repo = Repository::open(host_path).map_err(|_| ContainerError::NotAGitRepo(host_path.to_path_buf()))?;
 
         let bundle_path_str = bundle_host_path.to_string_lossy().to_string();
 
-        // Add a temporary remote pointing at the bundle file
-        let remote_name = format!("_cc_bundle_{}", rand_suffix());
-        let mut remote = repo.remote(&remote_name, &bundle_path_str)?;
+        // Use git CLI to fetch — libgit2 bundle support is flaky
+        let fetch_output = std::process::Command::new("git")
+            .args(["-C", &host_path.to_string_lossy(), "fetch", &bundle_path_str, "HEAD"])
+            .output()
+            .map_err(|e| ContainerError::Io(e))?;
 
-        // Fetch from the bundle
-        remote.fetch(&["HEAD"], None, None)?;
-        drop(remote);
+        if !fetch_output.status.success() {
+            // Try fetching all refs instead of HEAD
+            let fetch_all = std::process::Command::new("git")
+                .args(["-C", &host_path.to_string_lossy(), "fetch", &bundle_path_str, "+refs/*:refs/cc-bundle/*"])
+                .output()
+                .map_err(|e| ContainerError::Io(e))?;
 
-        // Resolve FETCH_HEAD
-        let fetch_head = repo.find_reference("FETCH_HEAD")?;
+            if !fetch_all.status.success() {
+                let stderr = String::from_utf8_lossy(&fetch_all.stderr);
+                return Err(ContainerError::ExtractionFailed {
+                    repo: repo_name.to_string(),
+                    reason: format!("git fetch from bundle failed: {}", stderr.lines().last().unwrap_or("unknown")),
+                });
+            }
+        }
+
+        // Resolve FETCH_HEAD (set by git fetch)
+        let fetch_head = repo.find_reference("FETCH_HEAD")
+            .map_err(|_| ContainerError::ExtractionFailed {
+                repo: repo_name.to_string(),
+                reason: "FETCH_HEAD not set after bundle fetch".to_string(),
+            })?;
         let fetch_commit = fetch_head.peel_to_commit()?;
         let new_head_oid = fetch_commit.id();
         let new_head = CommitHash::new(new_head_oid.to_string());
@@ -570,9 +756,6 @@ git bundle create /bundles/repo.bundle HEAD 2>&1
             }
             count
         };
-
-        // Clean up the temporary remote
-        repo.remote_delete(&remote_name).ok();
 
         // bundle_dir drops here, cleaning up the temp directory
 
@@ -832,6 +1015,171 @@ git bundle create /bundles/repo.bundle HEAD 2>&1
     // ========================================================================
 
     /// Inject changes from a host branch into the container's repo.
+    // ========================================================================
+    // Clone: host repo → session volume (initial session creation)
+    // ========================================================================
+
+    /// Clone a repo from the host into the session volume.
+    /// Used during session creation — the repo doesn't exist in the volume yet.
+    ///
+    /// Runs a throwaway container with alpine/git that:
+    /// 1. Bind-mounts the host repo at /upstream (read-only)
+    /// 2. Mounts the session volume at /session
+    /// 3. Runs `git clone` from /upstream into /session/<repo_name>
+    pub async fn clone_into_volume(
+        &self,
+        session: &SessionName,
+        repo_name: &str,
+        host_path: &Path,
+        branch: Option<&str>,
+    ) -> Result<(), ContainerError> {
+        let volume_name = session.session_volume();
+        let container_name = format!("cc-clone-{}-{}", session, rand_suffix());
+        let _ = self.docker.remove_container(
+            &container_name,
+            Some(RemoveContainerOptions { force: true, ..Default::default() }),
+        ).await;
+
+        let host_path_str = host_path.to_string_lossy().to_string();
+
+        let branch_flag = match branch {
+            Some(b) => format!("--branch \"{}\"", b),
+            None => String::new(),
+        };
+
+        let script = format!(
+            r#"
+git config --global --add safe.directory "*"
+git clone {branch_flag} "/upstream" "/session/{repo_name}" || exit 1
+cd "/session/{repo_name}" || exit 1
+echo "Cloned $(git rev-parse --short HEAD) on $(git symbolic-ref --short HEAD 2>/dev/null || echo 'detached')"
+"#,
+            branch_flag = branch_flag,
+            repo_name = repo_name,
+        );
+
+        let config = ContainerConfig {
+            image: Some(GIT_UTIL_IMAGE.to_string()),
+            entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
+            cmd: Some(vec![script]),
+            host_config: Some(bollard::models::HostConfig {
+                binds: Some(vec![
+                    format!("{}:/session", volume_name),
+                    format!("{}:/upstream:ro", host_path_str),
+                ]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let opts = CreateContainerOptions {
+            name: &container_name,
+            platform: None,
+        };
+        self.docker.create_container(Some(opts), config).await?;
+
+        self.docker
+            .start_container(&container_name, None::<StartContainerOptions<String>>)
+            .await?;
+
+        // Wait for exit
+        let mut wait_stream = self
+            .docker
+            .wait_container(&container_name, None::<WaitContainerOptions<String>>);
+        let mut exit_code: i64 = -1;
+        while let Some(result) = wait_stream.next().await {
+            match result {
+                Ok(resp) => exit_code = resp.status_code,
+                Err(e) => {
+                    let _ = self.docker.remove_container(
+                        &container_name,
+                        Some(RemoveContainerOptions { force: true, ..Default::default() }),
+                    ).await;
+                    return Err(ContainerError::Docker(e));
+                }
+            }
+        }
+
+        // Collect logs
+        let mut log_output = String::new();
+        let mut log_stream = self.docker.logs(
+            &container_name,
+            Some(LogsOptions::<String> {
+                stdout: true,
+                stderr: true,
+                follow: false,
+                ..Default::default()
+            }),
+        );
+        while let Some(chunk) = log_stream.next().await {
+            if let Ok(output) = chunk {
+                log_output.push_str(&output.to_string());
+            }
+        }
+
+        // Clean up
+        let _ = self.docker.remove_container(
+            &container_name,
+            Some(RemoveContainerOptions { force: true, ..Default::default() }),
+        ).await;
+
+        if exit_code != 0 {
+            return Err(ContainerError::ExtractionFailed {
+                repo: repo_name.to_string(),
+                reason: format!(
+                    "clone exited with code {}: {}",
+                    exit_code,
+                    log_output.lines().last().unwrap_or("unknown error"),
+                ),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Write a .main-project marker into the session volume.
+    pub async fn write_main_project(
+        &self,
+        session: &SessionName,
+        main_project: &str,
+    ) -> Result<(), ContainerError> {
+        let volume_name = session.session_volume();
+        let container_name = format!("cc-marker-{}-{}", session, rand_suffix());
+        let _ = self.docker.remove_container(
+            &container_name,
+            Some(RemoveContainerOptions { force: true, ..Default::default() }),
+        ).await;
+
+        let config = ContainerConfig {
+            image: Some(GIT_UTIL_IMAGE.to_string()),
+            entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
+            cmd: Some(vec![format!("echo '{}' > /session/.main-project", main_project)]),
+            host_config: Some(bollard::models::HostConfig {
+                binds: Some(vec![format!("{}:/session", volume_name)]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let opts = CreateContainerOptions { name: &container_name, platform: None };
+        self.docker.create_container(Some(opts), config).await?;
+        self.docker.start_container(&container_name, None::<StartContainerOptions<String>>).await?;
+
+        let mut wait = self.docker.wait_container(&container_name, None::<WaitContainerOptions<String>>);
+        while let Some(_) = wait.next().await {}
+
+        let _ = self.docker.remove_container(
+            &container_name,
+            Some(RemoveContainerOptions { force: true, ..Default::default() }),
+        ).await;
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // Inject: host branch → container volume (push into existing repo)
+    // ========================================================================
+
     ///
     /// Mounts the host repo read-only into a throwaway container alongside
     /// the session volume, then fetches and merges inside the container.
@@ -974,7 +1322,7 @@ git remote remove _cc_upstream 2>/dev/null
                 }
             };
 
-            let session_branch = format!("cc/{}/{}", session, action.repo_name);
+            let session_branch = session.to_string();
 
             let result = match &action.decision {
                 SyncDecision::Skip { reason } => {
@@ -1322,6 +1670,96 @@ fn count_commits_between(
         count += 1;
     }
     Ok(count)
+}
+
+/// Determine if the target branch is ahead of the session branch,
+/// and if so, whether those ahead commits are all squash artifacts
+/// (our own squash-merges) or external work by other people.
+fn compute_target_ahead(
+    repo: &Repository,
+    session_name: &str,
+    ancestry: &Ancestry,
+    squash: &SquashState,
+) -> TargetAheadKind {
+    // Only relevant when host is ahead of container
+    let host_ahead = match ancestry {
+        Ancestry::ContainerBehind { host_ahead } => *host_ahead,
+        Ancestry::Diverged { host_ahead, .. } => *host_ahead,
+        _ => return TargetAheadKind::NotAhead,
+    };
+
+    if host_ahead == 0 {
+        return TargetAheadKind::NotAhead;
+    }
+
+    // If we have an active squash-base, check if the ahead commits
+    // are between squash-base and the current target head.
+    // Squash-merges create commits on the target with our content but
+    // different hashes — these are "our" commits, not external work.
+    match squash {
+        SquashState::Active { base, .. } => {
+            // Look at the target branch (session_name is also used for the session branch).
+            // The session branch head is what the container sees.
+            // If all commits between session-head and target-head have commit messages
+            // matching our squash pattern, they're artifacts.
+            //
+            // Simple heuristic: if squash-base is recent (active), and the host-ahead
+            // count matches what we'd expect from squash-merging, treat as artifacts.
+            // For now, check commit messages for the session name pattern.
+            let session_branch = format!("refs/heads/{}", session_name);
+            let target_ref = repo.find_reference(&session_branch).ok();
+            if target_ref.is_none() {
+                return TargetAheadKind::HasExternalWork { external_count: host_ahead };
+            }
+
+            // Walk the ahead commits and check if they mention the session
+            let session_oid = match target_ref.unwrap().peel_to_commit() {
+                Ok(c) => c.id(),
+                Err(_) => return TargetAheadKind::HasExternalWork { external_count: host_ahead },
+            };
+
+            // Find the target branch head (we need to know what "target" is)
+            // In the relation, host_head is the target. But we don't have it here.
+            // Use the squash-base as lower bound instead.
+            let base_oid = match git2::Oid::from_str(base.as_str()) {
+                Ok(o) => o,
+                Err(_) => return TargetAheadKind::HasExternalWork { external_count: host_ahead },
+            };
+
+            // Walk commits from session_oid back to base_oid
+            let mut revwalk = match repo.revwalk() {
+                Ok(r) => r,
+                Err(_) => return TargetAheadKind::HasExternalWork { external_count: host_ahead },
+            };
+            let _ = revwalk.push(session_oid);
+            let _ = revwalk.hide(base_oid);
+
+            let mut external = 0u32;
+            for oid_result in revwalk {
+                let oid = match oid_result {
+                    Ok(o) => o,
+                    Err(_) => break,
+                };
+                if let Ok(commit) = repo.find_commit(oid) {
+                    let msg = commit.message().unwrap_or("");
+                    // Squash-merge commits typically contain the session name
+                    if !msg.contains(session_name) {
+                        external += 1;
+                    }
+                }
+            }
+
+            if external == 0 {
+                TargetAheadKind::AllSquashArtifacts
+            } else {
+                TargetAheadKind::HasExternalWork { external_count: external }
+            }
+        }
+        _ => {
+            // No squash history — all ahead commits are external
+            TargetAheadKind::HasExternalWork { external_count: host_ahead }
+        }
+    }
 }
 
 /// Build a human-readable description of the sync plan.

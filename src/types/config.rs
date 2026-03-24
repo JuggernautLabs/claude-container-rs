@@ -17,9 +17,52 @@ pub struct ProjectConfig {
     pub extract: bool,
     #[serde(default)]
     pub main: bool,
+    #[serde(default)]
+    pub role: RepoRole,
+}
+
+/// Role determines how a repo participates in sync operations.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RepoRole {
+    /// Source of truth — extract, merge, track changes (default)
+    Project,
+    /// Build dependency — mount in container, push updates in, don't extract
+    Dependency,
+}
+
+impl Default for RepoRole {
+    fn default() -> Self { Self::Project }
+}
+
+impl std::fmt::Display for RepoRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Project => write!(f, "project"),
+            Self::Dependency => write!(f, "dependency"),
+        }
+    }
 }
 
 fn default_true() -> bool { true }
+
+impl SessionConfig {
+    /// Return only project repos (filter out dependencies)
+    pub fn project_repos(&self) -> BTreeMap<String, &ProjectConfig> {
+        self.projects.iter()
+            .filter(|(_, cfg)| cfg.role == RepoRole::Project)
+            .map(|(k, v)| (k.clone(), v))
+            .collect()
+    }
+
+    /// Return only dependency repos
+    pub fn dependency_repos(&self) -> BTreeMap<String, &ProjectConfig> {
+        self.projects.iter()
+            .filter(|(_, cfg)| cfg.role == RepoRole::Dependency)
+            .map(|(k, v)| (k.clone(), v))
+            .collect()
+    }
+}
 
 impl SessionConfig {
     /// Find the main project (main: true, or cwd match, or first)

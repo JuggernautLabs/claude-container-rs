@@ -155,6 +155,13 @@ impl Lifecycle {
     // Image operations
     // ========================================================================
 
+    /// Resolve the image ID (sha256 digest) for an image reference.
+    pub async fn resolve_image_id(&self, image: &ImageRef) -> Result<ImageId> {
+        let inspect = self.docker.inspect_image(image.as_str()).await
+            .map_err(|_| ContainerError::ImageNotFound(image.clone()))?;
+        Ok(ImageId::new(inspect.id.unwrap_or_else(|| "unknown".into())))
+    }
+
     /// Validate that a Docker image has the required binaries.
     ///
     /// Runs a throwaway container that checks for each binary via `command -v`.
@@ -904,30 +911,24 @@ fn check_container_staleness(
         ));
     }
 
-    // Check script directory mount — look for a bind mount whose
-    // destination looks like /entrypoint or /scripts
-    let script_mount = info.mounts.iter().find(|m| {
+    // Check that cc-entrypoint is bind-mounted from the expected scripts dir
+    let entrypoint_mount = info.mounts.iter().find(|m| {
         m.mount_type == MountType::Bind
-            && (m.destination.to_string_lossy().contains("entrypoint")
-                || m.destination.to_string_lossy().contains("scripts"))
+            && m.destination == Path::new("/usr/local/bin/cc-entrypoint")
     });
 
-    match script_mount {
+    match entrypoint_mount {
         Some(mount) => {
-            // The mount source is the full path to the script file
-            // (e.g. /path/to/claude-container/lib/container/cc-entrypoint).
-            // Verify it's under the expected script_dir.
-            let actual_source = mount.source.to_string_lossy();
             let expected_prefix = script_dir.to_string_lossy();
-            if !actual_source.starts_with(expected_prefix.as_ref()) {
+            if !mount.source.to_string_lossy().starts_with(expected_prefix.as_ref()) {
                 reasons.push(format!(
-                    "script dir mismatch: mounted from {}, expected under {}",
-                    actual_source, expected_prefix
+                    "scripts from {}, expected under {}",
+                    mount.source.display(), script_dir.display()
                 ));
             }
         }
         None => {
-            reasons.push("entrypoint scripts not mounted (old container format)".to_string());
+            reasons.push("entrypoint scripts not mounted".to_string());
         }
     }
 

@@ -4,6 +4,7 @@ mod session;
 mod sync;
 mod container;
 mod render;
+pub mod scripts;
 
 use clap::{Parser, Subcommand};
 use types::*;
@@ -12,6 +13,9 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "git-sandbox", version, about = "Container-isolated Claude Code sessions")]
 struct Cli {
+    /// Skip all confirmation prompts (use in scripts)
+    #[arg(short = 'y', long, global = true)]
+    yes: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -23,6 +27,12 @@ enum Commands {
         /// Session name
         #[arg(short, long)]
         session: String,
+        /// Attach to an already-running container
+        #[arg(short, long)]
+        attach: bool,
+        /// Replay container output history when attaching
+        #[arg(short, long)]
+        logs: bool,
         /// Dockerfile or directory containing one
         #[arg(long)]
         dockerfile: Option<PathBuf>,
@@ -61,8 +71,12 @@ enum Commands {
         session: String,
         /// Target branch to merge into (omit for extract-only)
         branch: Option<String>,
+        /// Filter repos by regex (e.g. "plexus-" or "synapse|gamma")
+        #[arg(short, long)]
+        filter: Option<String>,
+        /// Include dependency repos (default: project repos only)
         #[arg(long)]
-        repo: Vec<String>,
+        all: bool,
         #[arg(long)]
         dry_run: bool,
         #[arg(long)]
@@ -76,8 +90,12 @@ enum Commands {
         session: String,
         /// Source branch (default: main)
         branch: Option<String>,
+        /// Filter repos by regex
+        #[arg(short, long)]
+        filter: Option<String>,
+        /// Include dependency repos
         #[arg(long)]
-        repo: Vec<String>,
+        all: bool,
         #[arg(long)]
         dry_run: bool,
         /// Merge strategy
@@ -90,8 +108,12 @@ enum Commands {
         session: String,
         /// Target branch
         branch: String,
+        /// Filter repos by regex
+        #[arg(short, long)]
+        filter: Option<String>,
+        /// Include dependency repos
         #[arg(long)]
-        repo: Vec<String>,
+        all: bool,
         #[arg(long)]
         dry_run: bool,
         #[arg(long)]
@@ -101,6 +123,9 @@ enum Commands {
     Session {
         #[arg(short, long)]
         session: String,
+        /// Filter repos by regex
+        #[arg(short, long)]
+        filter: Option<String>,
         #[command(subcommand)]
         action: Option<SessionAction>,
     },
@@ -109,14 +134,24 @@ enum Commands {
         #[arg(short, long)]
         session: String,
         branch: Option<String>,
-        #[arg(long)]
-        repo: Option<String>,
+        /// Filter repos by regex
+        #[arg(short, long)]
+        filter: Option<String>,
     },
+    /// List all sessions
+    #[command(name = "ls")]
+    List,
     /// Validate a Docker image meets the container protocol
     #[command(name = "validate-image")]
     ValidateImage {
         image: String,
     },
+}
+
+#[derive(clap::ValueEnum, Clone)]
+enum CliRepoRole {
+    Project,
+    Dependency,
 }
 
 #[derive(clap::ValueEnum, Clone)]
@@ -136,19 +171,60 @@ enum SessionAction {
     Diff { branch: Option<String> },
     /// Add repos to session
     AddRepo { paths: Vec<PathBuf> },
+    /// Start (or resume) the session container
+    Start {
+        /// Attach to already-running container
+        #[arg(short, long)]
+        attach: bool,
+        /// Replay logs when attaching
+        #[arg(short, long)]
+        logs: bool,
+    },
+    /// Stop a running container
+    Stop,
     /// Clean up stale state
     Cleanup,
     /// Remove container, keep volumes
     Rebuild,
+    /// Run a command inside the running container
+    Exec {
+        /// Run as root instead of developer
+        #[arg(long)]
+        root: bool,
+        /// Command to run
+        #[arg(trailing_var_arg = true)]
+        command: Vec<String>,
+    },
+    /// Check volumes for ownership/permission problems
+    Verify,
+    /// Fix ownership problems in volumes
+    Fix,
+    /// Set repo role (project or dependency)
+    SetRole {
+        /// Repo name or regex
+        repo: String,
+        /// Role: project or dependency
+        #[arg(value_enum)]
+        role: CliRepoRole,
+    },
     /// Set a session property
     Set { key: String, value: String },
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Restore terminal sanity in case a previous session leaked raw mode.
+    // crossterm::disable_raw_mode() only works if crossterm enabled it (same process).
+    // For cross-process leaks, we need to reset termios directly.
+    reset_terminal();
+
     let cli = Cli::parse();
+    let auto_yes = cli.yes;
 
     match cli.command {
+        Commands::List => {
+            cmd_list().await?;
+        }
         Commands::ValidateImage { image } => {
             cmd_validate_image(&image).await?;
         }
@@ -156,38 +232,72 @@ async fn main() -> anyhow::Result<()> {
             let name = SessionName::new(&session);
             cmd_run(&name, &prompt, dockerfile).await?;
         }
-        Commands::Start { session, dockerfile, discover_repos, r#continue, docker, as_root, from_branch, prompt } => {
+        Commands::Start { session, attach, logs, dockerfile, discover_repos, r#continue, docker, as_root, from_branch, prompt } => {
             let name = SessionName::new(&session);
-            cmd_start(&name, dockerfile, discover_repos, r#continue, docker, as_root, from_branch).await?;
+            cmd_start(&name, attach, logs, auto_yes, dockerfile, discover_repos, r#continue, docker, as_root, from_branch).await?;
         }
-        Commands::Session { session, action } => {
+        Commands::Session { session, filter, action } => {
             let name = SessionName::new(&session);
+            let f = filter.as_deref();
             match action.unwrap_or(SessionAction::Show) {
-                SessionAction::Show => cmd_session_show(&name).await?,
+                SessionAction::Show => cmd_session_show(&name, f).await?,
                 SessionAction::Diff { branch } => {
-                    cmd_sync_preview(&name, &branch.unwrap_or("main".into())).await?;
+                    cmd_sync_preview(&name, &branch.unwrap_or("main".into()), f).await?;
                 }
                 SessionAction::AddRepo { paths } => {
                     cmd_session_add_repo(&name, &paths).await?;
                 }
-                _ => eprintln!("Not yet implemented"),
+                SessionAction::Exec { root, command } => {
+                    cmd_session_exec(&name, root, &command).await?;
+                }
+                SessionAction::Start { attach, logs } => {
+                    cmd_start(&name, attach, logs, auto_yes, None, None, false, false, false, None).await?;
+                }
+                SessionAction::Stop => {
+                    cmd_session_stop(&name).await?;
+                }
+                SessionAction::Rebuild => {
+                    cmd_session_rebuild(&name, auto_yes).await?;
+                }
+                SessionAction::Cleanup => {
+                    cmd_session_cleanup(&name, auto_yes).await?;
+                }
+                SessionAction::Verify => {
+                    cmd_session_verify(&name).await?;
+                }
+                SessionAction::Fix => {
+                    cmd_session_fix(&name, auto_yes).await?;
+                }
+                SessionAction::SetDir { target } => {
+                    cmd_session_set_dir(&name, target.as_deref()).await?;
+                }
+                SessionAction::SetRole { repo, role } => {
+                    cmd_session_set_role(&name, &repo, role).await?;
+                }
+                SessionAction::Set { key, value } => {
+                    eprintln!("Setting {}={} — not yet wired to metadata", key, value);
+                }
             }
         }
-        Commands::Sync { session, branch, dry_run, .. } => {
+        Commands::Sync { session, branch, filter, all, dry_run, .. } => {
             let name = SessionName::new(&session);
-            cmd_sync_preview(&name, &branch).await?;
+            cmd_sync(&name, &branch, filter.as_deref(), all, dry_run, auto_yes).await?;
         }
-        Commands::Status { session, branch, .. } => {
+        Commands::Status { session, branch, filter, .. } => {
             let name = SessionName::new(&session);
-            cmd_sync_preview(&name, &branch.unwrap_or("main".into())).await?;
+            cmd_sync_preview(&name, &branch.unwrap_or("main".into()), filter.as_deref()).await?;
         }
-        Commands::Pull { session, branch, dry_run, .. } => {
+        Commands::Pull { session, branch, filter, all, dry_run, .. } => {
             let name = SessionName::new(&session);
-            cmd_sync_preview(&name, &branch.unwrap_or("main".into())).await?;
+            if let Some(branch) = branch {
+                cmd_pull(&name, &branch, filter.as_deref(), all, dry_run, auto_yes).await?;
+            } else {
+                cmd_extract(&name, filter.as_deref(), dry_run, auto_yes).await?;
+            }
         }
-        Commands::Push { session, branch, dry_run, .. } => {
+        Commands::Push { session, branch, filter, all, dry_run, .. } => {
             let name = SessionName::new(&session);
-            cmd_sync_preview(&name, &branch.unwrap_or("main".into())).await?;
+            cmd_push(&name, &branch.unwrap_or("main".into()), filter.as_deref(), all, dry_run, auto_yes).await?;
         }
     }
 
@@ -196,6 +306,76 @@ async fn main() -> anyhow::Result<()> {
 
 fn require_session(name: Option<SessionName>) -> anyhow::Result<SessionName> {
     name.ok_or_else(|| anyhow::anyhow!("--session required"))
+}
+
+async fn cmd_list() -> anyhow::Result<()> {
+    let lc = lifecycle::Lifecycle::new()?;
+    let docker = lc.docker_client();
+
+    // Discover sessions from Docker volumes (claude-session-*)
+    let volumes = docker.list_volumes(None::<bollard::volume::ListVolumesOptions<String>>).await?;
+    let mut session_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    if let Some(vols) = volumes.volumes {
+        for vol in &vols {
+            if let Some(name) = vol.name.strip_prefix("claude-session-") {
+                session_names.insert(name.to_string());
+            }
+        }
+    }
+
+    // Also check metadata dir on host
+    let meta_dir = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".config/claude-container/sessions");
+    if meta_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&meta_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                // Strip known extensions
+                let name = name.strip_suffix(".env")
+                    .or_else(|| name.strip_suffix(".yml"))
+                    .or_else(|| name.strip_suffix(".yaml"))
+                    .unwrap_or(&name)
+                    .to_string();
+                if !name.starts_with('.') {
+                    session_names.insert(name);
+                }
+            }
+        }
+    }
+
+    if session_names.is_empty() {
+        eprintln!("No sessions found.");
+        return Ok(());
+    }
+
+    // For each session, check container state
+    for name in &session_names {
+        let sn = SessionName::new(name);
+        let container_name = sn.container_name();
+
+        let state = match docker.inspect_container(container_name.as_str(), None).await {
+            Ok(info) => {
+                let running = info.state.as_ref()
+                    .and_then(|s| s.status.as_ref())
+                    .map(|s| matches!(s, bollard::models::ContainerStateStatusEnum::RUNNING))
+                    .unwrap_or(false);
+                if running { "running" } else { "stopped" }
+            }
+            Err(_) => "no container",
+        };
+
+        let marker = match state {
+            "running" => colored::Colorize::green("●"),
+            "stopped" => colored::Colorize::yellow("○"),
+            _ => colored::Colorize::dimmed("·"),
+        };
+
+        println!("  {} {:24} {}", marker, name, colored::Colorize::dimmed(state));
+    }
+
+    Ok(())
 }
 
 async fn cmd_validate_image(image: &str) -> anyhow::Result<()> {
@@ -211,6 +391,9 @@ async fn cmd_validate_image(image: &str) -> anyhow::Result<()> {
 
 async fn cmd_start(
     name: &SessionName,
+    attach: bool,
+    replay_logs: bool,
+    auto_yes: bool,
     dockerfile: Option<PathBuf>,
     discover_repos: Option<PathBuf>,
     _continue_session: bool,
@@ -279,6 +462,7 @@ async fn cmd_start(
                     path: repo.host_path.clone(),
                     extract: repo.extract_enabled,
                     main: false,
+                    role: Default::default(),
                 });
             }
             let config = types::SessionConfig {
@@ -290,8 +474,25 @@ async fn cmd_start(
             eprintln!("  Creating volumes...");
             lc.create_volumes(name).await?;
 
-            // TODO: clone repos into session volume
-            // For now, save config and let the user know
+            // Clone repos into session volume
+            let engine = sync::SyncEngine::new(lc.docker_client().clone());
+            for (i, repo) in repos.iter().enumerate() {
+                eprintln!("  Cloning [{}/{}] {}...", i + 1, repos.len(), repo.name);
+                engine.clone_into_volume(
+                    name,
+                    &repo.name,
+                    &repo.host_path,
+                    repo.branch.as_deref(),
+                ).await?;
+            }
+
+            // Write .main-project marker (first repo or the one matching cwd)
+            let main_project = repos.first().map(|r| r.name.as_str()).unwrap_or("");
+            if !main_project.is_empty() {
+                engine.write_main_project(name, main_project).await?;
+            }
+
+            // Save session metadata
             sm.save_metadata(&types::SessionMetadata {
                 name: name.clone(),
                 dockerfile: dockerfile.clone(),
@@ -303,9 +504,6 @@ async fn cmd_start(
             })?;
 
             eprintln!("  {} Session '{}' created with {} repo(s)", colored::Colorize::green("✓"), name, repos.len());
-            eprintln!("  {} Repo cloning into volume not yet implemented in rust.", colored::Colorize::yellow("⚠"));
-            eprintln!("  Use: claude-container -s {} to finish setup via bash.", name);
-            return Ok(());
         }
         crate::types::DiscoveredSession::VolumesOnly { .. } => {
             eprintln!("  Session exists, no container.");
@@ -314,14 +512,27 @@ async fn cmd_start(
             eprintln!("  Resuming stopped container...");
         }
         crate::types::DiscoveredSession::Running { .. } => {
-            eprintln!("  Container already running.");
-            eprintln!("  TODO: attach to running container");
+            if !attach {
+                eprintln!("  {} Container already running. Use -a to attach.", colored::Colorize::yellow("⚠"));
+                return Ok(());
+            }
+            // Attach directly — skip image/volume/token verification
+            eprintln!("  Attaching to running container...");
+            eprintln!();
+            use std::io::Write;
+            std::io::stderr().flush().ok();
+            container::attach_to_running(&lc, &name.container_name(), replay_logs).await?;
             return Ok(());
         }
     }
 
-    // Step 2: Resolve image
-    let image = if let Some(ref df) = dockerfile {
+    // Step 2: Resolve image — use provided dockerfile, or fall back to session metadata
+    let effective_dockerfile = dockerfile.clone().or_else(|| {
+        let sm2 = session::SessionManager::new(lc.docker_client().clone());
+        sm2.load_metadata(name).and_then(|m| m.dockerfile)
+    });
+
+    let image = if let Some(ref df) = effective_dockerfile {
         let df_path = if df.is_dir() {
             let candidate = df.join("Dockerfile");
             if candidate.exists() { candidate } else {
@@ -358,33 +569,23 @@ async fn cmd_start(
         .map_err(|_| anyhow::anyhow!("No auth token found. Set CLAUDE_CODE_OAUTH_TOKEN or create ~/.config/claude-container/token"))?;
     let verified_token = container::verify_token(&lc, token.trim())?;
 
-    // Determine entrypoint script dir (where cc-entrypoint lives)
-    // For now, use the bash claude-container's lib/container/ dir
-    let script_dir = std::env::var("CC_SCRIPT_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            // Try to find the bash claude-container's lib dir
-            let home = dirs::home_dir().unwrap_or_default();
-            let candidates = [
-                home.join(".local/share/claude-container"),
-                home.join("dev/controlflow/juggernautlabs/claude-container"),
-            ];
-            candidates.into_iter().find(|p| p.join("lib/container/cc-entrypoint").exists())
-                .unwrap_or_else(|| PathBuf::from("."))
-        });
+    // Materialize embedded scripts to cache dir for Docker bind-mounts
+    let script_dir = scripts::materialize()?;
 
-    // Plan launch target
-    let target = container::plan_target(&lc, &docker, name, &verified_image, &script_dir).await
-        .or_else(|e| {
-            // If container is running, attach instead
-            if let ContainerError::ContainerRunning(ref _ctr) = e {
-                eprintln!("  Container already running — attaching...");
-                // TODO: implement attach to running container
-                Err(e)
-            } else {
-                Err(e)
-            }
-        })?;
+    // Plan launch target (Running case already handled above via -a flag)
+    let target = container::plan_target(&lc, &docker, name, &verified_image, &script_dir).await?;
+
+    // If rebuild needed, show reasons and confirm
+    if let LaunchTarget::Rebuild(ref confirmed) = target {
+        eprintln!("  {} Container is stale:", colored::Colorize::yellow("⚠"));
+        for reason in confirmed.description.strip_prefix("Rebuild container: ").unwrap_or(&confirmed.description).split(", ") {
+            eprintln!("    {} {}", colored::Colorize::dimmed("·"), reason);
+        }
+        if !confirm("  Rebuild?", auto_yes) {
+            eprintln!("  Aborted.");
+            return Ok(());
+        }
+    }
 
     // Build LaunchReady — all proofs assembled
     let ready = crate::types::verified::LaunchReady {
@@ -452,18 +653,8 @@ async fn cmd_run(
         .map_err(|_| anyhow::anyhow!("No auth token found. Set CLAUDE_CODE_OAUTH_TOKEN or create ~/.config/claude-container/token"))?;
     let verified_token = container::verify_token(&lc, token.trim())?;
 
-    // Script dir
-    let script_dir = std::env::var("CC_SCRIPT_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = dirs::home_dir().unwrap_or_default();
-            let candidates = [
-                home.join(".local/share/claude-container"),
-                home.join("dev/controlflow/juggernautlabs/claude-container"),
-            ];
-            candidates.into_iter().find(|p| p.join("lib/container/cc-entrypoint").exists())
-                .unwrap_or_else(|| PathBuf::from("."))
-        });
+    // Materialize embedded scripts to cache dir for Docker bind-mounts
+    let script_dir = scripts::materialize()?;
 
     // Plan target
     let target = container::plan_target(&lc, &docker, name, &verified_image, &script_dir).await
@@ -503,11 +694,19 @@ async fn cmd_run(
     Ok(())
 }
 
-async fn cmd_session_show(name: &SessionName) -> anyhow::Result<()> {
+async fn cmd_session_show(name: &SessionName, filter: Option<&str>) -> anyhow::Result<()> {
     let lc = lifecycle::Lifecycle::new()?;
     let sm = session::SessionManager::new(lc.docker_client().clone());
     let discovered = sm.discover(name).await?;
-    let config = sm.read_config(name).await.ok().flatten();
+    let mut config = sm.read_config(name).await.ok().flatten();
+
+    // Apply filter to config projects
+    if let (Some(pattern), Some(ref mut cfg)) = (filter, &mut config) {
+        if let Ok(re) = regex::Regex::new(pattern) {
+            cfg.projects.retain(|name, _| re.is_match(name));
+        }
+    }
+
     render::session_info(name, &discovered, config.as_ref());
     Ok(())
 }
@@ -561,31 +760,1012 @@ async fn cmd_session_add_repo(name: &SessionName, paths: &[PathBuf]) -> anyhow::
         eprintln!("  {} {} → {}", colored::Colorize::blue("+"), repo_name, path.display());
     }
 
-    // TODO: actually clone repos into the session volume
-    // For now, just report what would be added
-    eprintln!();
-    eprintln!("  {} {} repo(s) identified", colored::Colorize::green("✓"), repos_to_add.len());
-    eprintln!("  {} Cloning into volume not yet implemented in rust.", colored::Colorize::yellow("⚠"));
+    // Clone repos into the session volume
+    let lc = lifecycle::Lifecycle::new()?;
+    let engine = sync::SyncEngine::new(lc.docker_client().clone());
+    for (i, (repo_name, path)) in repos_to_add.iter().enumerate() {
+        eprintln!("  Cloning [{}/{}] {}...", i + 1, repos_to_add.len(), repo_name);
+        engine.clone_into_volume(name, repo_name, path, None).await?;
+    }
+    eprintln!("  {} {} repo(s) added", colored::Colorize::green("✓"), repos_to_add.len());
 
     Ok(())
 }
 
-async fn cmd_sync_preview(name: &SessionName, branch: &str) -> anyhow::Result<()> {
+async fn cmd_session_exec(name: &SessionName, as_root: bool, command: &[String]) -> anyhow::Result<()> {
+    let lc = lifecycle::Lifecycle::new()?;
+    let docker = lc.docker_client();
+    let container_name = name.container_name();
+
+    // Check container is running
+    match lc.inspect_container(&container_name).await? {
+        types::docker::ContainerState::Running { .. } => {}
+        _ => anyhow::bail!("Container not running. Start it first."),
+    }
+
+    let cmd = if command.is_empty() {
+        vec!["bash".to_string()]
+    } else {
+        vec!["bash".to_string(), "-c".to_string(), command.join(" ")]
+    };
+
+    let exec = docker.create_exec(
+        container_name.as_str(),
+        bollard::exec::CreateExecOptions {
+            cmd: Some(cmd),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            user: Some(if as_root { "root".to_string() } else { "developer".to_string() }),
+            ..Default::default()
+        },
+    ).await?;
+
+    let output = docker.start_exec(&exec.id, None::<bollard::exec::StartExecOptions>).await?;
+
+    if let bollard::exec::StartExecResults::Attached { mut output, .. } = output {
+        use futures_util::StreamExt;
+        while let Some(Ok(chunk)) = output.next().await {
+            print!("{}", chunk);
+        }
+    }
+
+    Ok(())
+}
+
+async fn cmd_session_stop(name: &SessionName) -> anyhow::Result<()> {
+    let lc = lifecycle::Lifecycle::new()?;
+    let container_name = name.container_name();
+
+    match lc.inspect_container(&container_name).await? {
+        types::docker::ContainerState::Running { .. } => {
+            eprintln!("  Stopping {}...", container_name);
+            lc.docker_client().stop_container(
+                container_name.as_str(),
+                Some(bollard::container::StopContainerOptions { t: 10 }),
+            ).await?;
+            eprintln!("  {} Stopped.", colored::Colorize::green("✓"));
+        }
+        types::docker::ContainerState::Stopped { .. } => {
+            eprintln!("  Already stopped.");
+        }
+        types::docker::ContainerState::NotFound { .. } => {
+            eprintln!("  No container.");
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_session_rebuild(name: &SessionName, auto_yes: bool) -> anyhow::Result<()> {
+    let lc = lifecycle::Lifecycle::new()?;
+    let container_name = name.container_name();
+
+    // Check current state
+    match lc.inspect_container(&container_name).await? {
+        types::docker::ContainerState::NotFound { .. } => {
+            eprintln!("  No container to rebuild.");
+            return Ok(());
+        }
+        types::docker::ContainerState::Running { .. } => {
+            if !confirm("  Container is running. Stop and rebuild?", auto_yes) {
+                eprintln!("  Aborted.");
+                return Ok(());
+            }
+        }
+        _ => {}
+    }
+
+    eprintln!("  Removing container {}...", container_name);
+    lc.remove_container(&container_name).await?;
+    eprintln!("  {} Container removed. Volumes preserved.", colored::Colorize::green("✓"));
+
+    // Rebuild image if session has a Dockerfile
+    let sm = session::SessionManager::new(lc.docker_client().clone());
+    if let Some(meta) = sm.load_metadata(name) {
+        if let Some(ref df) = meta.dockerfile {
+            let df_path = if df.is_dir() {
+                df.join("Dockerfile")
+            } else {
+                df.clone()
+            };
+            if df_path.exists() {
+                let image_name = format!("claude-dev-{}", name);
+                let image_ref = ImageRef::new(&image_name);
+                eprintln!("  Rebuilding image {} from {}...", image_name, df_path.display());
+                lc.build_image(&image_ref, &df_path, &df_path.parent().unwrap_or(&PathBuf::from("."))).await?;
+                eprintln!("  {} Image rebuilt.", colored::Colorize::green("✓"));
+            }
+        }
+    }
+
+    eprintln!("  Run `git-sandbox start -s {}` to launch.", name);
+    Ok(())
+}
+
+async fn cmd_session_cleanup(name: &SessionName, auto_yes: bool) -> anyhow::Result<()> {
+    if !confirm("  Remove stale markers from session volume?", auto_yes) {
+        eprintln!("  Aborted.");
+        return Ok(());
+    }
+
+    let lc = lifecycle::Lifecycle::new()?;
+
+    // Remove stale markers from the session volume
+    let engine = sync::SyncEngine::new(lc.docker_client().clone());
+    let volume = name.session_volume();
+    let container_name = format!("cc-cleanup-{}", name);
+
+    let _ = lc.docker_client().remove_container(
+        &container_name,
+        Some(bollard::container::RemoveContainerOptions { force: true, ..Default::default() }),
+    ).await;
+
+    let script = "rm -f /session/.reconcile-complete /session/.merge-into-summary /session/.merge-into-branch /session/.sync-summary /session/.sync-branch 2>/dev/null; echo CLEANED";
+    let config = bollard::container::Config {
+        image: Some("alpine/git".to_string()),
+        entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
+        cmd: Some(vec![script.to_string()]),
+        host_config: Some(bollard::models::HostConfig {
+            binds: Some(vec![format!("{}:/session", volume)]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    lc.docker_client().create_container(
+        Some(bollard::container::CreateContainerOptions { name: container_name.as_str(), platform: None }),
+        config,
+    ).await?;
+    lc.docker_client().start_container(&container_name, None::<bollard::container::StartContainerOptions<String>>).await?;
+
+    use futures_util::StreamExt;
+    let mut wait = lc.docker_client().wait_container(&container_name, None::<bollard::container::WaitContainerOptions<String>>);
+    while let Some(_) = wait.next().await {}
+
+    let _ = lc.docker_client().remove_container(
+        &container_name,
+        Some(bollard::container::RemoveContainerOptions { force: true, ..Default::default() }),
+    ).await;
+
+    eprintln!("  {} Stale markers removed from session volume.", colored::Colorize::green("✓"));
+    Ok(())
+}
+
+/// Scan session volumes for ownership problems.
+/// Runs a throwaway container that checks every file's UID against HOST_UID.
+async fn cmd_session_verify(name: &SessionName) -> anyhow::Result<()> {
+    let lc = lifecycle::Lifecycle::new()?;
+    let docker = lc.docker_client();
+    let host_uid = unsafe { libc::getuid() };
+
+    eprintln!("  Checking volumes for UID {} (your host UID)...", host_uid);
+    eprintln!();
+
+    let volumes = [
+        (name.session_volume(), "/workspace"),
+        (name.state_volume(), "/home/developer/.claude"),
+        (name.cargo_volume(), "/home/developer/.cargo"),
+        (name.npm_volume(), "/home/developer/.npm"),
+        (name.pip_volume(), "/home/developer/.cache/pip"),
+    ];
+
+    let mut binds = Vec::new();
+    for (vol, mount) in &volumes {
+        binds.push(format!("{}:{}:ro", vol, mount));
+    }
+
+    // Script: for each mount, count files not owned by HOST_UID
+    let script = format!(
+        r#"
+for dir in /workspace /home/developer/.claude /home/developer/.cargo /home/developer/.npm /home/developer/.cache/pip; do
+    [ -d "$dir" ] || continue
+    total=$(find "$dir" -maxdepth 3 2>/dev/null | wc -l | tr -d ' ')
+    bad=$(find "$dir" -maxdepth 3 ! -uid {uid} 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$bad" -gt 0 ]; then
+        echo "PROBLEM|$dir|$bad|$total"
+        find "$dir" -maxdepth 2 ! -uid {uid} -ls 2>/dev/null | head -10
+    else
+        echo "OK|$dir|0|$total"
+    fi
+done
+"#,
+        uid = host_uid,
+    );
+
+    let container_name = format!("cc-verify-{}", name);
+    let _ = docker.remove_container(
+        &container_name,
+        Some(bollard::container::RemoveContainerOptions { force: true, ..Default::default() }),
+    ).await;
+
+    let config = bollard::container::Config {
+        image: Some("alpine/git".to_string()),
+        entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
+        cmd: Some(vec![script]),
+        host_config: Some(bollard::models::HostConfig {
+            binds: Some(binds),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    docker.create_container(
+        Some(bollard::container::CreateContainerOptions { name: container_name.as_str(), platform: None }),
+        config,
+    ).await?;
+    docker.start_container(&container_name, None::<bollard::container::StartContainerOptions<String>>).await?;
+
+    use futures_util::StreamExt;
+    let mut wait = docker.wait_container(&container_name, None::<bollard::container::WaitContainerOptions<String>>);
+    while let Some(_) = wait.next().await {}
+
+    let mut stdout = String::new();
+    let mut logs = docker.logs(
+        &container_name,
+        Some(bollard::container::LogsOptions::<String> { stdout: true, stderr: true, follow: false, ..Default::default() }),
+    );
+    while let Some(Ok(chunk)) = logs.next().await {
+        stdout.push_str(&chunk.to_string());
+    }
+
+    let _ = docker.remove_container(
+        &container_name,
+        Some(bollard::container::RemoveContainerOptions { force: true, ..Default::default() }),
+    ).await;
+
+    let mut problems = 0;
+    for line in stdout.lines() {
+        if line.starts_with("OK|") {
+            let parts: Vec<&str> = line.split('|').collect();
+            if parts.len() >= 4 {
+                eprintln!("  {} {} — {} file(s), all owned by you", colored::Colorize::green("✓"), parts[1], parts[3]);
+            }
+        } else if line.starts_with("PROBLEM|") {
+            let parts: Vec<&str> = line.split('|').collect();
+            if parts.len() >= 4 {
+                eprintln!("  {} {} — {}/{} file(s) wrong owner", colored::Colorize::red("✗"), parts[1], parts[2], parts[3]);
+                problems += 1;
+            }
+        } else if !line.trim().is_empty() {
+            // ls -l output for bad files
+            eprintln!("    {}", colored::Colorize::dimmed(line.trim()));
+        }
+    }
+
+    eprintln!();
+    if problems > 0 {
+        eprintln!("  {} {} volume(s) have ownership problems.", colored::Colorize::yellow("⚠"), problems);
+        eprintln!("  Run `git-sandbox session -s {} fix` to repair.", name);
+    } else {
+        eprintln!("  {} All volumes clean.", colored::Colorize::green("✓"));
+    }
+
+    Ok(())
+}
+
+/// Fix ownership in all session volumes — recursive chown to HOST_UID.
+async fn cmd_session_fix(name: &SessionName, auto_yes: bool) -> anyhow::Result<()> {
+    let lc = lifecycle::Lifecycle::new()?;
+    let docker = lc.docker_client();
+    let host_uid = unsafe { libc::getuid() };
+    let host_gid = unsafe { libc::getgid() };
+
+    if !confirm(&format!("  chown -R {}:{} on all volumes?", host_uid, host_gid), auto_yes) {
+        eprintln!("  Aborted.");
+        return Ok(());
+    }
+    eprintln!("  Fixing ownership to {}:{} in all volumes...", host_uid, host_gid);
+
+    let volumes = [
+        (name.session_volume(), "/workspace"),
+        (name.state_volume(), "/home/developer/.claude"),
+        (name.cargo_volume(), "/home/developer/.cargo"),
+        (name.npm_volume(), "/home/developer/.npm"),
+        (name.pip_volume(), "/home/developer/.cache/pip"),
+    ];
+
+    let mut binds = Vec::new();
+    for (vol, mount) in &volumes {
+        binds.push(format!("{}:{}", vol, mount));
+    }
+
+    let script = format!(
+        "chown -R {}:{} /workspace /home/developer/.claude /home/developer/.cargo /home/developer/.npm /home/developer/.cache/pip 2>/dev/null; echo FIXED",
+        host_uid, host_gid,
+    );
+
+    let container_name = format!("cc-fix-{}", name);
+    let _ = docker.remove_container(
+        &container_name,
+        Some(bollard::container::RemoveContainerOptions { force: true, ..Default::default() }),
+    ).await;
+
+    let config = bollard::container::Config {
+        image: Some("alpine/git".to_string()),
+        user: Some("0:0".to_string()), // run as root to chown
+        entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
+        cmd: Some(vec![script]),
+        host_config: Some(bollard::models::HostConfig {
+            binds: Some(binds),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    docker.create_container(
+        Some(bollard::container::CreateContainerOptions { name: container_name.as_str(), platform: None }),
+        config,
+    ).await?;
+    docker.start_container(&container_name, None::<bollard::container::StartContainerOptions<String>>).await?;
+
+    use futures_util::StreamExt;
+    let mut wait = docker.wait_container(&container_name, None::<bollard::container::WaitContainerOptions<String>>);
+    while let Some(_) = wait.next().await {}
+
+    let _ = docker.remove_container(
+        &container_name,
+        Some(bollard::container::RemoveContainerOptions { force: true, ..Default::default() }),
+    ).await;
+
+    eprintln!("  {} All volumes fixed.", colored::Colorize::green("✓"));
+    Ok(())
+}
+
+async fn cmd_session_set_role(name: &SessionName, repo_pattern: &str, role: CliRepoRole) -> anyhow::Result<()> {
     let lc = lifecycle::Lifecycle::new()?;
     let sm = session::SessionManager::new(lc.docker_client().clone());
 
-    // Read config to get repo paths
+    let mut config = sm.read_config(name).await?
+        .ok_or_else(|| anyhow::anyhow!("No config in session '{}'", name))?;
+
+    let target_role = match role {
+        CliRepoRole::Project => types::config::RepoRole::Project,
+        CliRepoRole::Dependency => types::config::RepoRole::Dependency,
+    };
+
+    let re = regex::Regex::new(repo_pattern)
+        .map_err(|e| anyhow::anyhow!("Invalid pattern '{}': {}", repo_pattern, e))?;
+
+    let mut matched = 0;
+    for (pname, pcfg) in config.projects.iter_mut() {
+        if re.is_match(pname) {
+            pcfg.role = target_role.clone();
+            matched += 1;
+            eprintln!("  {} {} → {}", colored::Colorize::green("✓"), pname, target_role);
+        }
+    }
+
+    if matched == 0 {
+        anyhow::bail!("No repos match '{}'", repo_pattern);
+    }
+
+    // Write updated config back to the session volume
+    sm.write_config(name, &config).await?;
+
+    eprintln!("  {} {} repo(s) updated", colored::Colorize::green("✓"), matched);
+    Ok(())
+}
+
+async fn cmd_session_set_dir(name: &SessionName, target: Option<&str>) -> anyhow::Result<()> {
+    let lc = lifecycle::Lifecycle::new()?;
+    let engine = sync::SyncEngine::new(lc.docker_client().clone());
+
+    match target {
+        Some(dir) => {
+            engine.write_main_project(name, dir).await?;
+            eprintln!("  {} Main project set to '{}'", colored::Colorize::green("✓"), dir);
+        }
+        None => {
+            // Clear the main project
+            let volume = name.session_volume();
+            let container_name = format!("cc-setdir-{}", name);
+            let _ = lc.docker_client().remove_container(
+                &container_name,
+                Some(bollard::container::RemoveContainerOptions { force: true, ..Default::default() }),
+            ).await;
+
+            let config = bollard::container::Config {
+                image: Some("alpine/git".to_string()),
+                entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
+                cmd: Some(vec!["rm -f /session/.main-project".to_string()]),
+                host_config: Some(bollard::models::HostConfig {
+                    binds: Some(vec![format!("{}:/session", volume)]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+
+            lc.docker_client().create_container(
+                Some(bollard::container::CreateContainerOptions { name: container_name.as_str(), platform: None }),
+                config,
+            ).await?;
+            lc.docker_client().start_container(&container_name, None::<bollard::container::StartContainerOptions<String>>).await?;
+
+            use futures_util::StreamExt;
+            let mut wait = lc.docker_client().wait_container(&container_name, None::<bollard::container::WaitContainerOptions<String>>);
+            while let Some(_) = wait.next().await {}
+
+            let _ = lc.docker_client().remove_container(
+                &container_name,
+                Some(bollard::container::RemoveContainerOptions { force: true, ..Default::default() }),
+            ).await;
+
+            eprintln!("  {} Main project cleared (defaults to /workspace)", colored::Colorize::green("✓"));
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_sync_preview(name: &SessionName, branch: &str, filter: Option<&str>) -> anyhow::Result<()> {
+    let (_lc, _engine, plan, _repo_paths) = build_sync_plan(name, branch, filter, false).await?;
+    render::sync_plan(&plan.action);
+    Ok(())
+}
+
+/// Extract-only: pull container work into session branches, no merge into target.
+/// Shows a diff preview of what changed in the container vs the host.
+async fn cmd_extract(name: &SessionName, filter: Option<&str>, dry_run: bool, auto_yes: bool) -> anyhow::Result<()> {
+    let lc = lifecycle::Lifecycle::new()?;
+    let sm = session::SessionManager::new(lc.docker_client().clone());
+
     let config = sm.read_config(name).await?
         .ok_or_else(|| anyhow::anyhow!("No config in session '{}'", name))?;
 
-    let repo_paths: std::collections::BTreeMap<String, std::path::PathBuf> = config.projects.iter()
+    let engine = sync::SyncEngine::new(lc.docker_client().clone());
+
+    // Snapshot container
+    let mut volume_repos = engine.snapshot(name, "").await?;
+
+    // Apply filter
+    if let Some(pattern) = filter {
+        let re = regex::Regex::new(pattern)
+            .map_err(|e| anyhow::anyhow!("Invalid filter regex '{}': {}", pattern, e))?;
+        volume_repos.retain(|vr| re.is_match(&vr.name));
+        if volume_repos.is_empty() {
+            anyhow::bail!("No repos match filter '{}'", pattern);
+        }
+    }
+
+    // Classify: new (no session branch on host) vs changed (container ahead of session branch)
+    let mut changed = Vec::new();
+    let mut unchanged = 0u32;
+
+    for vr in &volume_repos {
+        let host_path = match config.projects.get(&vr.name) {
+            Some(cfg) => &cfg.path,
+            None => continue,
+        };
+        let session_branch = name.to_string();
+
+        // Check if session branch exists on host and compare
+        let host_session_head = git2::Repository::open(host_path).ok()
+            .and_then(|repo| {
+                repo.find_reference(&format!("refs/heads/{}", session_branch)).ok()
+                    .and_then(|r| r.peel_to_commit().ok())
+                    .map(|c| types::CommitHash::new(c.id().to_string()))
+            });
+
+        let container_head = &vr.head;
+
+        // Compute diff: host session branch HEAD → container HEAD
+        let diff = host_session_head.as_ref().and_then(|h_head| {
+            engine.compute_diff(host_path, h_head, container_head)
+        });
+
+        let is_same = host_session_head.as_ref().map_or(false, |h| h.as_str() == container_head.as_str());
+        if is_same {
+            unchanged += 1;
+            continue;
+        }
+
+        let status = if host_session_head.is_none() { "new" } else { "changed" };
+        changed.push((vr, host_path.clone(), session_branch, diff, status));
+    }
+
+    // Render preview
+    render::rule(Some(&format!("extract: {}", name)));
+    if changed.is_empty() {
+        eprintln!("{}", colored::Colorize::dimmed("Nothing new to extract."));
+        return Ok(());
+    }
+
+    eprintln!("{} to extract, {} unchanged", changed.len(), unchanged);
+    eprintln!();
+
+    for (vr, host_path, session_branch, _, status) in &changed {
+        let short_head = &vr.head.as_str()[..7.min(vr.head.as_str().len())];
+        if *status == "new" {
+            eprintln!("  {} {} → {} (new, container:{})",
+                colored::Colorize::blue("←"), vr.name, session_branch,
+                colored::Colorize::dimmed(short_head));
+        } else {
+            // Show commit range: session_head..container_head
+            let session_head = git2::Repository::open(host_path).ok()
+                .and_then(|repo| {
+                    repo.find_reference(&format!("refs/heads/{}", session_branch)).ok()
+                        .and_then(|r| r.peel_to_commit().ok())
+                        .map(|c| c.id().to_string())
+                });
+            let from = session_head.as_deref().map(|s| &s[..7]).unwrap_or("?");
+            eprintln!("  {} {} → {} ({}..{})",
+                colored::Colorize::green("←"), vr.name, session_branch,
+                colored::Colorize::dimmed(from), short_head);
+        }
+    }
+
+    // Full diffstat for changed repos (not new ones — no base to diff against)
+    let diffs_to_show: Vec<_> = changed.iter()
+        .filter(|(_, _, _, diff, _)| diff.is_some())
+        .collect();
+
+    if !diffs_to_show.is_empty() {
+        eprintln!();
+        render::rule(None);
+        eprintln!();
+        eprintln!("session diff:");
+
+        let mut total_files = 0u32;
+        let mut total_ins = 0u32;
+        let mut total_del = 0u32;
+
+        for (vr, _, _, diff, _) in &diffs_to_show {
+            if let Some(d) = diff {
+                if d.files.is_empty() { continue; }
+                eprintln!("  {}", colored::Colorize::blue(vr.name.as_str()));
+                let max_path = d.files.iter().map(|f| f.path.len()).max().unwrap_or(20);
+                for f in &d.files {
+                    let bar = render::render_change_bar_pub(f.insertions, f.deletions, 40);
+                    eprintln!("     {:width$} | {:>4} {}", f.path, f.insertions + f.deletions, bar, width = max_path);
+                }
+                eprintln!("     {} file(s) changed, {} insertions(+), {} deletions(-)",
+                    d.files_changed, d.insertions, d.deletions);
+                eprintln!();
+                total_files += d.files_changed;
+                total_ins += d.insertions;
+                total_del += d.deletions;
+            }
+        }
+
+        if total_files > 0 {
+            eprintln!("{} Total: {} file(s), +{} -{}", colored::Colorize::dimmed("→"), total_files, total_ins, total_del);
+        }
+    }
+
+    if dry_run {
+        return Ok(());
+    }
+
+    if !confirm(&format!("\n  Extract {} repo(s)?", changed.len()), auto_yes) {
+        eprintln!("  Aborted.");
+        return Ok(());
+    }
+
+    let mut extracted = 0u32;
+    let mut failed = 0u32;
+    for (vr, host_path, session_branch, _, _) in &changed {
+        match engine.extract(name, &vr.name, host_path, session_branch).await {
+            Ok(result) => {
+                eprintln!("  {} {} ({} commit(s))", colored::Colorize::green("✓"), vr.name, result.commit_count);
+                extracted += 1;
+            }
+            Err(e) => {
+                eprintln!("  {} {} — {}", colored::Colorize::red("✗"), vr.name, e);
+                failed += 1;
+            }
+        }
+    }
+
+    eprintln!();
+    if failed > 0 {
+        eprintln!("  {} {} extracted, {} failed", colored::Colorize::yellow("⚠"), extracted, failed);
+    } else {
+        eprintln!("  {} {} extracted to session branches", colored::Colorize::green("✓"), extracted);
+    }
+    Ok(())
+}
+
+async fn cmd_pull(name: &SessionName, branch: &str, filter: Option<&str>, include_deps: bool, dry_run: bool, auto_yes: bool) -> anyhow::Result<()> {
+    let (lc, engine, plan, repo_paths) = build_sync_plan(name, branch, filter, include_deps).await?;
+
+    // Collect info before consuming plan
+    let has_clean = plan.action.repo_actions.iter()
+        .any(|a| matches!(a.decision, types::SyncDecision::Pull { .. } | types::SyncDecision::CloneToHost));
+    let pending_merge_repos: Vec<(String, std::path::PathBuf)> = plan.action.repo_actions.iter()
+        .filter(|a| a.session_ahead_of_target > 0 && matches!(a.decision, types::SyncDecision::Skip { .. }))
+        .filter_map(|a| a.host_path.clone().map(|p| (a.repo_name.clone(), p)))
+        .collect();
+    struct DivergedInfo {
+        repo_name: String,
+        container_ahead: u32,
+        host_ahead: u32,
+        has_conflict: bool,
+        conflict_files: Vec<String>,
+    }
+    let diverged_repos: Vec<DivergedInfo> = plan.action.repo_actions.iter()
+        .filter(|a| matches!(a.decision, types::SyncDecision::Reconcile { .. }))
+        .map(|a| {
+            let (ca, ha) = match &a.decision {
+                types::SyncDecision::Reconcile { container_ahead, host_ahead } => (*container_ahead, *host_ahead),
+                _ => (0, 0),
+            };
+            let has_conflict = a.trial_conflicts.as_ref().map_or(false, |f| !f.is_empty());
+            let conflict_files = a.trial_conflicts.clone().unwrap_or_default();
+            DivergedInfo { repo_name: a.repo_name.clone(), container_ahead: ca, host_ahead: ha, has_conflict, conflict_files }
+        })
+        .collect();
+
+    render::sync_plan(&plan.action);
+
+    if dry_run || (!has_clean && diverged_repos.is_empty() && pending_merge_repos.is_empty()) {
+        return Ok(());
+    }
+
+    use std::io::Write;
+
+    // Execute clean pulls (extract + merge)
+    if has_clean {
+        if confirm("\n  Pull new repos?", auto_yes) {
+            eprintln!();
+            let result = engine.execute_sync(name, plan.action, &repo_paths).await?;
+            render::sync_result(&result);
+        } else {
+            eprintln!("  Skipped clean pulls.");
+        }
+    }
+
+    // Execute pending merges (session branch → target, no extraction needed)
+    if !pending_merge_repos.is_empty() {
+        let session_branch = name.to_string();
+        if confirm(&format!("\n  Merge {} repo(s) from session branch into {}?", pending_merge_repos.len(), branch), auto_yes) {
+            for (repo_name, host_path) in &pending_merge_repos {
+                match engine.merge(host_path, &session_branch, branch, true) {
+                    Ok(outcome) => {
+                        eprintln!("  {} {} — {:?}", colored::Colorize::green("✓"), repo_name, outcome);
+                    }
+                    Err(e) => {
+                        eprintln!("  {} {} — {}", colored::Colorize::red("✗"), repo_name, e);
+                    }
+                }
+            }
+        }
+    }
+
+    // Handle diverged repos — prompt per repo
+    if !diverged_repos.is_empty() {
+        eprintln!();
+        let mut conflict_repos = Vec::new();
+
+        for dinfo in &diverged_repos {
+            let merge_status = if dinfo.has_conflict {
+                format!("{}", colored::Colorize::red("CONFLICT"))
+            } else {
+                format!("{}", colored::Colorize::green("auto-merge possible"))
+            };
+
+            eprintln!("  {} {} — container +{}, host +{} ({})",
+                colored::Colorize::yellow("↔"), dinfo.repo_name, dinfo.container_ahead, dinfo.host_ahead, merge_status);
+
+            if dinfo.has_conflict {
+                eprint!("    [s]kip  [r]econcile with Claude  > ");
+            } else {
+                eprint!("    [a]uto-merge  [s]kip  [r]econcile with Claude  > ");
+            }
+            std::io::stderr().flush().ok();
+            let mut choice = String::new();
+            std::io::stdin().read_line(&mut choice).ok();
+            let choice = choice.trim().to_lowercase();
+
+            match choice.chars().next().unwrap_or('s') {
+                'a' if !dinfo.has_conflict => {
+                    let host_path = match repo_paths.get(&dinfo.repo_name) {
+                        Some(p) => p,
+                        None => { eprintln!("    {} no host path", colored::Colorize::red("✗")); continue; }
+                    };
+                    let session_branch = name.to_string();
+                    match engine.inject(name, &dinfo.repo_name, host_path, branch).await {
+                        Ok(()) => {
+                            match engine.extract(name, &dinfo.repo_name, host_path, &session_branch).await {
+                                Ok(extract) => {
+                                    match engine.merge(host_path, &session_branch, branch, true) {
+                                        Ok(outcome) => eprintln!("    {} auto-merged ({:?})", colored::Colorize::green("✓"), outcome),
+                                        Err(e) => eprintln!("    {} merge failed: {}", colored::Colorize::red("✗"), e),
+                                    }
+                                }
+                                Err(e) => eprintln!("    {} extract failed: {}", colored::Colorize::red("✗"), e),
+                            }
+                        }
+                        Err(e) => eprintln!("    {} inject failed: {}", colored::Colorize::red("✗"), e),
+                    }
+                }
+                'r' => {
+                    // Collect for agentic reconciliation
+                    if let Some(host_path) = repo_paths.get(&dinfo.repo_name) {
+                        conflict_repos.push((dinfo.repo_name.clone(), host_path.clone(), dinfo.conflict_files.clone()));
+                    }
+                }
+                _ => {
+                    eprintln!("    {} skipped", colored::Colorize::dimmed("·"));
+                }
+            }
+        }
+
+        // Launch agentic reconciliation for collected repos
+        if !conflict_repos.is_empty() {
+            offer_reconciliation(&lc, name, &conflict_repos, branch).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn cmd_push(name: &SessionName, branch: &str, filter: Option<&str>, include_deps: bool, dry_run: bool, auto_yes: bool) -> anyhow::Result<()> {
+    let (_lc, engine, plan, repo_paths) = build_sync_plan(name, branch, filter, include_deps).await?;
+
+    let has_pushes = plan.action.repo_actions.iter().any(|a| matches!(
+        a.decision,
+        types::SyncDecision::Push { .. } | types::SyncDecision::PushToContainer
+    ));
+
+    render::sync_plan(&plan.action);
+
+    if dry_run || !has_pushes {
+        return Ok(());
+    }
+
+    if !confirm("\n  Execute push?", auto_yes) {
+        eprintln!("  Aborted.");
+        return Ok(());
+    }
+
+    eprintln!();
+    let result = engine.execute_sync(name, plan.action, &repo_paths).await?;
+    render::sync_result(&result);
+    Ok(())
+}
+
+async fn cmd_sync(name: &SessionName, branch: &str, filter: Option<&str>, include_deps: bool, dry_run: bool, auto_yes: bool) -> anyhow::Result<()> {
+    let (lc, engine, plan, repo_paths) = build_sync_plan(name, branch, filter, include_deps).await?;
+
+    let has_work = plan.action.has_work();
+
+    render::sync_plan(&plan.action);
+
+    if dry_run || !has_work {
+        return Ok(());
+    }
+
+    if !confirm("\n  Execute sync?", auto_yes) {
+        eprintln!("  Aborted.");
+        return Ok(());
+    }
+
+    eprintln!();
+    let result = engine.execute_sync(name, plan.action, &repo_paths).await?;
+    render::sync_result(&result);
+
+    let conflicts = collect_conflicts(&result, &repo_paths);
+    if !conflicts.is_empty() {
+        offer_reconciliation(&lc, name, &conflicts, branch).await?;
+    }
+
+    Ok(())
+}
+
+/// Extract conflict info from sync results for agentic reconciliation.
+fn collect_conflicts(
+    result: &types::SyncResult,
+    repo_paths: &std::collections::BTreeMap<String, std::path::PathBuf>,
+) -> Vec<(String, std::path::PathBuf, Vec<String>)> {
+    result.results.iter().filter_map(|r| {
+        if let types::action::RepoSyncResult::Failed { repo_name, error } = r {
+            // Check if the error mentions conflicts
+            if error.contains("Conflict") || error.contains("conflict") {
+                let host_path = repo_paths.get(repo_name)?.clone();
+                // Parse conflict files from error message if possible
+                let files = if let Some(start) = error.find('[') {
+                    if let Some(end) = error.find(']') {
+                        error[start+1..end].split(", ")
+                            .map(|s| s.trim().trim_matches('"').to_string())
+                            .collect()
+                    } else { vec![] }
+                } else { vec![] };
+                Some((repo_name.clone(), host_path, files))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }).collect()
+}
+
+/// Offer agentic reconciliation: launch Claude to resolve merge conflicts.
+async fn offer_reconciliation(
+    lc: &lifecycle::Lifecycle,
+    name: &SessionName,
+    conflicts: &[(String, std::path::PathBuf, Vec<String>)],
+    branch: &str,
+) -> anyhow::Result<()> {
+    eprintln!();
+    eprintln!("  {} Merge conflicts in {} repo(s):", colored::Colorize::yellow("⚠"), conflicts.len());
+    for (repo_name, _, files) in conflicts {
+        if files.is_empty() {
+            eprintln!("    {} {}", colored::Colorize::red("✗"), repo_name);
+        } else {
+            eprintln!("    {} {} ({} file(s))", colored::Colorize::red("✗"), repo_name, files.len());
+            for f in files.iter().take(5) {
+                eprintln!("      {}", colored::Colorize::dimmed(f.as_str()));
+            }
+            if files.len() > 5 {
+                eprintln!("      {} more...", files.len() - 5);
+            }
+        }
+    }
+
+    eprint!("\n  Launch Claude to resolve conflicts? [Y/n] ");
+    use std::io::Write;
+    std::io::stderr().flush().ok();
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer).ok();
+    if answer.trim().to_lowercase().starts_with('n') {
+        eprintln!("  Conflicts left unresolved. Fix manually and re-run pull.");
+        return Ok(());
+    }
+
+    // Build verification proofs for container launch
+    let docker = container::verify_docker(lc).await?;
+    let image_ref = ImageRef::new("ghcr.io/hypermemetic/claude-container:latest");
+    let verified_image = container::verify_image(lc, &docker, &image_ref).await?;
+    let volumes = container::verify_volumes(lc, &docker, name).await?;
+
+    let token = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
+        .or_else(|_| {
+            let token_file = dirs::home_dir()
+                .unwrap_or_default()
+                .join(".config/claude-container/token");
+            std::fs::read_to_string(&token_file)
+        })
+        .map_err(|_| anyhow::anyhow!("No auth token"))?;
+    let verified_token = container::verify_token(lc, token.trim())?;
+
+    let ready = types::verified::LaunchReady {
+        docker,
+        image: verified_image,
+        volumes,
+        token: verified_token,
+        container: types::verified::LaunchTarget::Create,
+    };
+
+    let script_dir = scripts::materialize()?;
+
+    eprintln!();
+    std::io::stderr().flush().ok();
+
+    let reconciled = container::launch_reconciliation(
+        lc, ready, name, &script_dir, conflicts,
+    ).await?;
+
+    if reconciled {
+        eprintln!();
+        eprintln!("  {} Reconciliation complete. Re-extracting...", colored::Colorize::green("✓"));
+
+        // Re-extract the resolved repos
+        let engine = sync::SyncEngine::new(lc.docker_client().clone());
+        for (repo_name, host_path, _) in conflicts {
+            let session_branch = name.to_string();
+            match engine.extract(name, repo_name, host_path, &session_branch).await {
+                Ok(extract) => {
+                    eprintln!("    {} {} — {} commit(s)", colored::Colorize::green("✓"), repo_name, extract.commit_count);
+                    // Merge the resolved work
+                    match engine.merge(host_path, &session_branch, branch, true) {
+                        Ok(outcome) => eprintln!("    {} {} — {:?}", colored::Colorize::green("✓"), repo_name, outcome),
+                        Err(e) => eprintln!("    {} {} — merge failed: {}", colored::Colorize::red("✗"), repo_name, e),
+                    }
+                }
+                Err(e) => eprintln!("    {} {} — extract failed: {}", colored::Colorize::red("✗"), repo_name, e),
+            }
+        }
+    } else {
+        eprintln!();
+        eprintln!("  {} Claude exited without calling fin. Conflicts unresolved.", colored::Colorize::yellow("⚠"));
+    }
+
+    Ok(())
+}
+
+/// Shared: build a sync plan (used by pull, push, sync, status)
+async fn build_sync_plan(
+    name: &SessionName,
+    branch: &str,
+    filter: Option<&str>,
+    include_deps: bool,
+) -> anyhow::Result<(
+    lifecycle::Lifecycle,
+    sync::SyncEngine,
+    types::Plan<types::SessionSyncPlan>,
+    std::collections::BTreeMap<String, std::path::PathBuf>,
+)> {
+    let lc = lifecycle::Lifecycle::new()?;
+    let sm = session::SessionManager::new(lc.docker_client().clone());
+
+    let config = sm.read_config(name).await?
+        .ok_or_else(|| anyhow::anyhow!("No config in session '{}'", name))?;
+
+    let mut repo_paths: std::collections::BTreeMap<String, std::path::PathBuf> = config.projects.iter()
+        .filter(|(_, pcfg)| include_deps || pcfg.role == types::config::RepoRole::Project)
         .map(|(pname, pcfg)| (pname.clone(), pcfg.path.clone()))
         .collect();
+
+    // Apply regex filter if provided
+    if let Some(pattern) = filter {
+        let re = regex::Regex::new(pattern)
+            .map_err(|e| anyhow::anyhow!("Invalid filter regex '{}': {}", pattern, e))?;
+        repo_paths.retain(|name, _| re.is_match(name));
+        if repo_paths.is_empty() {
+            anyhow::bail!("No repos match filter '{}'", pattern);
+        }
+    }
 
     let engine = sync::SyncEngine::new(lc.docker_client().clone());
     let plan = engine.plan_sync(name, branch, &repo_paths).await?;
 
-    render::sync_plan(&plan.action);
+    Ok((lc, engine, plan, repo_paths))
+}
 
-    Ok(())
+/// Reset terminal to cooked mode, handling cross-process raw mode leaks.
+///
+/// Unconditionally ensures OPOST (output processing) is on so that \n → \r\n.
+/// Without OPOST, eprintln! produces staircase output.
+/// Also restores ICANON/ECHO if missing (full raw mode leak).
+/// Prompt for confirmation. Returns true if confirmed.
+/// With --yes, always returns true without prompting.
+fn confirm(prompt: &str, auto_yes: bool) -> bool {
+    if auto_yes { return true; }
+    eprint!("{} [Y/n] ", prompt);
+    use std::io::Write;
+    std::io::stderr().flush().ok();
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer).ok();
+    !answer.trim().to_lowercase().starts_with('n')
+}
+
+fn reset_terminal() {
+    // Restore cursor visibility (Claude Code hides it)
+    print!("\x1b[?25h");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+
+    #[cfg(unix)]
+    {
+        unsafe {
+            let fd = libc::STDERR_FILENO;
+            let mut termios: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(fd, &mut termios) != 0 {
+                return; // not a terminal
+            }
+
+            let mut needs_fix = false;
+
+            // OPOST off = staircase (\n without \r)
+            if termios.c_oflag & libc::OPOST == 0 {
+                termios.c_oflag |= libc::OPOST;
+                needs_fix = true;
+            }
+
+            // ICANON off = raw input mode
+            if termios.c_lflag & libc::ICANON == 0 {
+                termios.c_lflag |= libc::ICANON | libc::ISIG | libc::IEXTEN;
+                termios.c_iflag |= libc::ICRNL | libc::IXON;
+                needs_fix = true;
+            }
+
+            // ECHO off = no local echo
+            if termios.c_lflag & libc::ECHO == 0 {
+                termios.c_lflag |= libc::ECHO;
+                needs_fix = true;
+            }
+
+            if needs_fix {
+                libc::tcsetattr(fd, libc::TCSANOW, &termios);
+            }
+        }
+    }
 }

@@ -1,0 +1,84 @@
+#!/bin/bash
+# cc-agent-run — wraps claude with pre/post hooks for state tracking
+# Mounted at /usr/local/bin/cc-agent-run
+#
+# Contract:
+#   Pre-agent:  snapshot HEAD of each repo in /workspace
+#   Run:        claude (NOT exec — we need control back for post-agent)
+#   Post-agent: diff state, write .agent-result summary
+#
+# Input:  [claude-args...] [prompt]
+# Output: /workspace/.agent-result (pipe-delimited, machine-readable)
+#
+# Format of .agent-result:
+#   <repo>|<commit-count>|<current-sha>    (one line per changed repo)
+#   ---
+#   total|<commits>|<changed-repos>|<total-repos>
+#
+# NO set -e. Agent wrapper must always reach post-agent phase.
+
+# ============================================================================
+# Signal Forwarding
+# ============================================================================
+
+CLAUDE_PID=""
+
+_forward_signal() {
+    if [[ -n "$CLAUDE_PID" ]]; then
+        kill -"$1" "$CLAUDE_PID" 2>/dev/null || true
+    fi
+}
+
+trap '_forward_signal TERM' TERM
+trap '_forward_signal INT' INT
+trap '_forward_signal HUP' HUP
+
+# ============================================================================
+# Pre-Agent: Snapshot State
+# ============================================================================
+
+for repo in /workspace/*/; do
+    [ -d "$repo/.git" ] || continue
+    name=$(basename "$repo")
+    git -C "$repo" rev-parse HEAD > "/tmp/.agent-entry-${name}" 2>/dev/null || true
+done
+
+# ============================================================================
+# Run Claude
+# ============================================================================
+
+# Run claude in foreground, capture PID for signal forwarding
+claude "$@" &
+CLAUDE_PID=$!
+wait $CLAUDE_PID 2>/dev/null
+CLAUDE_EXIT=$?
+
+# ============================================================================
+# Post-Agent: Diff State & Write Result
+# ============================================================================
+
+_total_commits=0
+_changed_repos=0
+_total_repos=0
+
+for repo in /workspace/*/; do
+    [ -d "$repo/.git" ] || continue
+    name=$(basename "$repo")
+    _total_repos=$((_total_repos + 1))
+
+    entry=$(cat "/tmp/.agent-entry-${name}" 2>/dev/null || echo "")
+    current=$(git -C "$repo" rev-parse HEAD 2>/dev/null || echo "")
+
+    if [[ -n "$entry" && -n "$current" && "$entry" != "$current" ]]; then
+        count=$(git -C "$repo" rev-list --count "${entry}..${current}" 2>/dev/null || echo "?")
+        echo "${name}|${count}|${current}" >> /workspace/.agent-result
+        _total_commits=$((_total_commits + count))
+        _changed_repos=$((_changed_repos + 1))
+    fi
+done
+
+# Write a machine-readable summary line at the end
+echo "---" >> /workspace/.agent-result 2>/dev/null || true
+echo "total|${_total_commits}|${_changed_repos}|${_total_repos}" >> /workspace/.agent-result 2>/dev/null || true
+
+exit $CLAUDE_EXIT

@@ -54,7 +54,7 @@ pub async fn verify_image(
             missing,
         });
     }
-    let image_id = ImageId::new("TODO"); // would come from docker inspect
+    let image_id = lc.resolve_image_id(image).await?;
     Ok(Verified::new_unchecked(ValidImage {
         image: image.clone(),
         image_id,
@@ -114,8 +114,7 @@ pub async fn plan_target(
                     })))
                 }
                 crate::lifecycle::ContainerCheck::Stale { reasons } => {
-                    // Need user confirmation to rebuild
-                    // For now, return Rebuild without confirmation (TODO: interactive prompt)
+                    // Return Rebuild — caller prompts for confirmation
                     Ok(LaunchTarget::Rebuild(Verified::new_unchecked(UserConfirmed {
                         description: format!("Rebuild container: {}", reasons.join(", ")),
                     })))
@@ -205,20 +204,13 @@ fn build_create_args(
         "/home/developer/.cache/pip".to_string(),
     ));
 
-    // --- Bind mounts for entrypoint scripts ---
-    let container_scripts_dir = script_dir.join("lib/container");
-    let scripts = ["cc-entrypoint", "cc-developer-setup", "cc-agent-run"];
-    for script in &scripts {
-        let host_path = container_scripts_dir.join(script);
-        if host_path.exists() {
-            args.binds.push(format!(
-                "{}:/usr/local/bin/{}:ro",
-                host_path.display(),
-                script,
-            ));
-        } else {
-            eprintln!("  ⚠ Script not found: {}", host_path.display());
-        }
+    // --- Bind mounts for entrypoint scripts (embedded, materialized to script_dir) ---
+    for script in ["cc-entrypoint", "cc-developer-setup", "cc-agent-run"] {
+        args.binds.push(format!(
+            "{}:/usr/local/bin/{}:ro",
+            script_dir.join(script).display(),
+            script,
+        ));
     }
 
     // --- SSH and gitconfig (read-only, best-effort) ---
@@ -301,9 +293,149 @@ fn terminal_size() -> (u16, u16) {
 /// This function takes ownership of the terminal (raw mode) and blocks until
 /// the container exits or the connection drops. Terminal state is restored
 /// on return (including on panic, via Drop guard).
+/// Launch a reconciliation container: Claude resolves merge conflicts interactively.
+///
+/// The container is created/rebuilt with:
+///   - AGENT_TASK=resolve-conflicts
+///   - Host repos bind-mounted read-only at /host/<repo>
+///   - Conflict summary injected via AGENT_CONTEXT
+///   - Claude sees CLAUDE.md with conflict details
+///   - User interacts until Claude calls `fin "description"`
+///
+/// Returns true if reconciliation completed (.reconcile-complete exists).
+pub async fn launch_reconciliation(
+    lc: &Lifecycle,
+    ready: LaunchReady,
+    session_name: &SessionName,
+    script_dir: &Path,
+    conflict_repos: &[(String, std::path::PathBuf, Vec<String>)], // (name, host_path, conflict_files)
+) -> Result<bool, ContainerError> {
+    let container_name = session_name.container_name();
+
+    // Remove existing container — reconciliation always gets a fresh one
+    let _ = lc.remove_container(&container_name).await;
+
+    let mut args = build_create_args(&ready, session_name, script_dir);
+
+    // Set agent task
+    args.env.push("AGENT_TASK=resolve-conflicts".to_string());
+
+    // Build conflict summary
+    let mut summary = String::from("Merge conflicts detected during pull:\n\n");
+    for (repo_name, _, files) in conflict_repos {
+        summary.push_str(&format!("## {}\n", repo_name));
+        for f in files {
+            summary.push_str(&format!("  - {}\n", f));
+        }
+        summary.push('\n');
+    }
+    summary.push_str("Resolve all conflicts, commit, then run: fin \"<description>\"\n");
+
+    // Base64-encode the context for AGENT_CONTEXT env var
+    let context_b64 = base64_encode(&summary);
+    args.env.push(format!("AGENT_CONTEXT={}", context_b64));
+
+    // Bind-mount host repos read-only at /host/<repo_name>
+    for (repo_name, host_path, _) in conflict_repos {
+        args.binds.push(format!(
+            "{}:/host/{}:ro",
+            host_path.display(),
+            repo_name,
+        ));
+    }
+
+    // Create, start, attach
+    lc.create_container(&container_name, &ready.image.image, args).await?;
+    lc.start_container(&container_name).await?;
+
+    eprintln!("  Launching Claude for conflict resolution...");
+    eprintln!();
+    use std::io::Write;
+    std::io::stderr().flush().ok();
+
+    attach_container(lc, &container_name, false).await?;
+
+    // After Claude exits, check for .reconcile-complete marker
+    let check = check_reconcile_complete(lc, session_name).await;
+    Ok(check)
+}
+
+/// Check if .reconcile-complete exists in the session volume
+async fn check_reconcile_complete(
+    lc: &Lifecycle,
+    session: &SessionName,
+) -> bool {
+    let volume = session.session_volume();
+    let container_name = format!("cc-check-reconcile-{}", session);
+    let docker = lc.docker_client();
+
+    let _ = docker.remove_container(
+        &container_name,
+        Some(bollard::container::RemoveContainerOptions { force: true, ..Default::default() }),
+    ).await;
+
+    let config = bollard::container::Config {
+        image: Some("alpine/git".to_string()),
+        entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
+        cmd: Some(vec!["test -f /session/.reconcile-complete && cat /session/.reconcile-complete || echo __NONE__".to_string()]),
+        host_config: Some(bollard::models::HostConfig {
+            binds: Some(vec![format!("{}:/session:ro", volume)]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let create = docker.create_container(
+        Some(bollard::container::CreateContainerOptions { name: container_name.as_str(), platform: None }),
+        config,
+    ).await;
+    if create.is_err() { return false; }
+
+    let _ = docker.start_container(
+        &container_name,
+        None::<bollard::container::StartContainerOptions<String>>,
+    ).await;
+
+    let mut wait = docker.wait_container(
+        &container_name,
+        None::<bollard::container::WaitContainerOptions<String>>,
+    );
+    while let Some(_) = wait.next().await {}
+
+    let mut stdout = String::new();
+    let mut logs = docker.logs(
+        &container_name,
+        Some(bollard::container::LogsOptions::<String> {
+            stdout: true,
+            follow: false,
+            ..Default::default()
+        }),
+    );
+    while let Some(Ok(chunk)) = logs.next().await {
+        stdout.push_str(&chunk.to_string());
+    }
+
+    let _ = docker.remove_container(
+        &container_name,
+        Some(bollard::container::RemoveContainerOptions { force: true, ..Default::default() }),
+    ).await;
+
+    !stdout.contains("__NONE__")
+}
+
+/// Public entry point: attach to an already-running container.
+pub async fn attach_to_running(
+    lc: &Lifecycle,
+    container_name: &ContainerName,
+    replay_logs: bool,
+) -> Result<(), ContainerError> {
+    attach_container(lc, container_name, replay_logs).await
+}
+
 async fn attach_container(
     lc: &Lifecycle,
     container_name: &ContainerName,
+    replay_logs: bool,
 ) -> Result<(), ContainerError> {
     let docker = lc.docker_client();
 
@@ -323,7 +455,7 @@ async fn attach_container(
         stdout: Some(true),
         stderr: Some(true),
         stream: Some(true),
-        logs: Some(true),
+        logs: Some(replay_logs),
         ..Default::default()
     };
 
@@ -354,6 +486,7 @@ async fn attach_container(
                         if count >= 1 {
                             // Second Ctrl-C: force exit
                             let _ = crossterm::terminal::disable_raw_mode();
+                            eprint!("\x1b[?25h"); // show cursor
                             eprintln!("\r\n→ Detached.");
                             std::process::exit(0);
                         }
@@ -412,6 +545,7 @@ async fn attach_container(
         ctrlc_flag_clone.store(true, std::sync::atomic::Ordering::SeqCst);
         // Restore terminal immediately (raw mode guard is in another scope)
         let _ = crossterm::terminal::disable_raw_mode();
+        eprint!("\x1b[?25h"); // show cursor
         eprintln!("\n\r→ Detached from container.");
         std::process::exit(0);
     });
@@ -441,6 +575,10 @@ async fn attach_container(
     resize_handle.abort();
 
     // _raw_guard drops here, restoring terminal
+
+    // Restore cursor visibility — Claude Code hides it for its TUI
+    print!("\x1b[?25h");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
 
     Ok(())
 }
@@ -592,13 +730,13 @@ pub async fn launch(
             let args = build_create_args(&ready, session_name, script_dir);
             lc.create_container(&container_name, &ready.image.image, args).await?;
             lc.start_container(&container_name).await?;
-            attach_container(lc, &container_name).await?;
+            attach_container(lc, &container_name, false).await?;
         }
 
         LaunchTarget::Resume(resumable) => {
             eprintln!("  Resuming container {}...", resumable.name);
             lc.start_container(&resumable.name).await?;
-            attach_container(lc, &resumable.name).await?;
+            attach_container(lc, &resumable.name, false).await?;
         }
 
         LaunchTarget::Rebuild(confirmed) => {
@@ -609,7 +747,7 @@ pub async fn launch(
             let args = build_create_args(&ready, session_name, script_dir);
             lc.create_container(&container_name, &ready.image.image, args).await?;
             lc.start_container(&container_name).await?;
-            attach_container(lc, &container_name).await?;
+            attach_container(lc, &container_name, false).await?;
         }
     }
 

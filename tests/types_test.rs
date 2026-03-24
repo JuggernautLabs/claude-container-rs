@@ -1,14 +1,14 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use claude_container::types::ids::*;
-use claude_container::types::git::*;
-use claude_container::types::session::*;
-use claude_container::types::verified::*;
-use claude_container::types::config::*;
-use claude_container::types::image::*;
-use claude_container::types::docker::*;
-use claude_container::types::volume::*;
+use git_sandbox::types::ids::*;
+use git_sandbox::types::git::*;
+use git_sandbox::types::session::*;
+use git_sandbox::types::verified::*;
+use git_sandbox::types::config::*;
+use git_sandbox::types::image::*;
+use git_sandbox::types::docker::*;
+use git_sandbox::types::volume::*;
 
 // ============================================================================
 // Helpers

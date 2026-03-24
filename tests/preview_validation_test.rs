@@ -1,11 +1,11 @@
 //! Preview validation — verify that what we SHOW matches what IS.
 //! Compares sync plan output against direct git/docker queries.
 
-use claude_container::lifecycle::Lifecycle;
-use claude_container::session::SessionManager;
-use claude_container::sync::SyncEngine;
-use claude_container::types::*;
-use claude_container::types::git::*;
+use git_sandbox::lifecycle::Lifecycle;
+use git_sandbox::session::SessionManager;
+use git_sandbox::sync::SyncEngine;
+use git_sandbox::types::*;
+use git_sandbox::types::git::*;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -198,7 +198,7 @@ async fn test_render_sync_plan_for_review() {
     let plan = engine.plan_sync(&session, "main", &repo_paths).await.unwrap();
 
     println!("\n=== RENDERED SYNC PLAN (for human review) ===\n");
-    claude_container::render::sync_plan(&plan.action);
+    git_sandbox::render::sync_plan(&plan.action);
     println!("\n=== END RENDERED OUTPUT ===\n");
 
     // Print detailed breakdown for each non-skip repo

@@ -1,0 +1,255 @@
+#!/bin/bash
+# cc-developer-setup — Phase 2: Config setup + Phase 3: Launch
+# Runs as developer (via gosu from cc-entrypoint) or as root in root mode.
+#
+# Contract:
+#   Phase 2 (config):
+#     - Create config dirs
+#     - Symlink .claude.json into state volume
+#     - Merge trust entries into .claude.json
+#     - Write statusline settings.json
+#     - Copy .gitconfig from /tmp staging area
+#     - CLAUDE.md injection (task-specific)
+#
+#   Phase 3 (launch):
+#     - Resolve working directory
+#     - Build claude args
+#     - Check for initial prompt
+#     - exec cc-agent-run
+#
+# NO set -e. Every non-critical operation uses || true.
+# NO chown. We are already running as the target user.
+
+# ============================================================================
+# Phase 2: Config Setup
+# ============================================================================
+
+# Create config directories (we own these — no chown needed)
+mkdir -p ~/.claude ~/.cargo ~/.npm ~/.cache/pip 2>/dev/null || true
+
+# .claude.json lives in the state volume (.claude/) so it survives container rebuilds.
+# Symlink from the expected location to the volume.
+if [[ ! -L ~/.claude.json ]] || [[ "$(readlink ~/.claude.json 2>/dev/null)" != "$HOME/.claude/.claude.json" ]]; then
+    rm -f ~/.claude.json 2>/dev/null || true
+    ln -s "$HOME/.claude/.claude.json" ~/.claude.json || true
+fi
+
+# Merge trust entries into existing .claude.json (preserves conversations, settings)
+python3 << 'TRUSTPY' 2>/dev/null || true
+import json, glob, os
+
+config_path = os.path.expanduser("~/.claude/.claude.json")
+
+config = {}
+try:
+    with open(config_path) as f:
+        config = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    pass
+
+config.setdefault("theme", "dark-ansi")
+config["hasCompletedOnboarding"] = True
+config["bypassPermissionsModeAccepted"] = True
+
+projects = config.get("projects", {})
+projects["/workspace"] = {"hasTrustDialogAccepted": True}
+for pattern in ["/workspace/*/", "/workspace/*/*/"]:
+    for d in glob.glob(pattern):
+        if os.path.isdir(os.path.join(d, ".git")):
+            proj = projects.setdefault(d.rstrip("/"), {})
+            proj["hasTrustDialogAccepted"] = True
+config["projects"] = projects
+
+with open(config_path, "w") as f:
+    json.dump(config, f)
+TRUSTPY
+
+# Statusline settings (base64-encoded to avoid quoting issues)
+echo "eyJzdGF0dXNMaW5lIjp7InR5cGUiOiJjb21tYW5kIiwiY29tbWFuZCI6ImlucHV0PSQoY2F0KTsgbW9kZWw9JChlY2hvIFwiJGlucHV0XCIgfCBqcSAtciAnLm1vZGVsLmRpc3BsYXlfbmFtZSAvLyAubW9kZWwuaWQgLy8gXCI/XCInIHwgdHIgJ1s6dXBwZXI6XScgJ1s6bG93ZXI6XScgfCB0ciAnICcgJy0nKTsgY29zdD0kKGVjaG8gXCIkaW5wdXRcIiB8IGpxIC1yICcuY29zdC50b3RhbF9jb3N0X3VzZCAvLyAwJyB8IHhhcmdzIHByaW50ZiAnJCUuMmYnKTsgb3ZlcjIwMGs9JChlY2hvIFwiJGlucHV0XCIgfCBqcSAtciAnLmV4Y2VlZHNfMjAwa190b2tlbnMnKTsgaWYgWyBcIiRvdmVyMjAwa1wiID0gXCJ0cnVlXCIgXTsgdGhlbiBjdHg9J+KaoO+4jz4yMDBrJzsgZWxzZSBjdHg9JzwyMDBrJzsgZmk7IGN3ZD0kKGVjaG8gXCIkaW5wdXRcIiB8IGpxIC1yICcud29ya3NwYWNlLmN1cnJlbnRfZGlyJyk7IGRpcj0kKGJhc2VuYW1lIFwiJGN3ZFwiKTsgY2QgXCIkY3dkXCIgMj4vZGV2L251bGwgfHwgdHJ1ZTsgYnJhbmNoPSQoZ2l0IHN5bWJvbGljLXJlZiAtLXNob3J0IEhFQUQgMj4vZGV2L251bGwpOyBkaXJ0eT0kKGdpdCBzdGF0dXMgLS1wb3JjZWxhaW4gMj4vZGV2L251bGwgfCBoZWFkIC0xKTsgaWYgWyAtbiBcIiRkaXJ0eVwiIF07IHRoZW4gbWFyaz0nKic7IGVsc2UgbWFyaz0nJzsgZmk7IHNlc3M9XCIke0NMQVVERV9TRVNTSU9OX05BTUU6LX1cIjsgaWYgWyAtbiBcIiRzZXNzXCIgXSAmJiBbIC1uIFwiJGJyYW5jaFwiIF07IHRoZW4gZWNobyBcIlskc2Vzc10gJG1vZGVsQCRkaXI6KCRicmFuY2gkbWFyaykgJGNvc3QgJGN0eFwiOyBlbGlmIFsgLW4gXCIkc2Vzc1wiIF07IHRoZW4gZWNobyBcIlskc2Vzc10gJG1vZGVsQCRkaXIgJGNvc3QgJGN0eFwiOyBlbGlmIFsgLW4gXCIkYnJhbmNoXCIgXTsgdGhlbiBlY2hvIFwiJG1vZGVsQCRkaXI6KCRicmFuY2gkbWFyaykgJGNvc3QgJGN0eFwiOyBlbHNlIGVjaG8gXCIkbW9kZWxAJGRpciAkY29zdCAkY3R4XCI7IGZpIn19Cg==" | base64 -d > "$HOME/.claude/settings.json" 2>/dev/null || true
+
+# Copy git config from staging area (cc-entrypoint put it in /tmp)
+if [[ -f /tmp/.gitconfig-source ]]; then
+    cp /tmp/.gitconfig-source ~/.gitconfig 2>/dev/null || true
+fi
+
+# ============================================================================
+# CLAUDE.md Injection
+# ============================================================================
+
+_inject_claude_md() {
+    local task="${AGENT_TASK:-work}"
+    local session="${CLAUDE_SESSION_NAME:-}"
+    local context_b64="${AGENT_CONTEXT:-}"
+    local context=""
+
+    if [[ -n "$context_b64" ]]; then
+        context=$(echo "$context_b64" | base64 -d 2>/dev/null || echo "$context_b64" | base64 -D 2>/dev/null || echo "")
+    fi
+
+    # Build repo list from /workspace
+    local repos=()
+    for repo in /workspace/*/; do
+        [[ -d "$repo/.git" ]] && repos+=("$(basename "$repo")")
+    done
+
+    local claude_md=""
+
+    case "$task" in
+        resolve-conflicts)
+            claude_md="# Conflict Resolution Session"
+            claude_md+=$'\n\n'"You are resolving merge conflicts in a claude-container session."
+            claude_md+=$'\n\n'"## Session: ${session}"
+            claude_md+=$'\n\n'"## Repos in workspace"
+            for r in "${repos[@]}"; do
+                claude_md+=$'\n'"- /workspace/$r"
+            done
+            if [[ -n "$context" ]]; then
+                claude_md+=$'\n\n'"## Conflict Details"
+                claude_md+=$'\n'"$context"
+            fi
+            claude_md+=$'\n\n'"## Instructions"
+            claude_md+=$'\n'"- Host repos are mounted read-only at /host/<repo_name>"
+            claude_md+=$'\n'"- Resolve all merge conflicts, preferring session work"
+            claude_md+=$'\n'"- Commit resolved files"
+            claude_md+=$'\n'"- When done, run: fin \"<brief description>\""
+            ;;
+        rebase-conflicts)
+            claude_md="# Rebase Conflict Resolution Session"
+            claude_md+=$'\n\n'"You are resolving rebase conflicts in a claude-container session."
+            claude_md+=$'\n\n'"## Session: ${session}"
+            claude_md+=$'\n\n'"## Repos in workspace"
+            for r in "${repos[@]}"; do
+                claude_md+=$'\n'"- /workspace/$r"
+            done
+            if [[ -n "$context" ]]; then
+                claude_md+=$'\n\n'"## Conflict Details"
+                claude_md+=$'\n'"$context"
+            fi
+            claude_md+=$'\n\n'"## Instructions"
+            claude_md+=$'\n'"- For each conflicted project:"
+            claude_md+=$'\n'"  1. Find files with <<<<<<< markers"
+            claude_md+=$'\n'"  2. Resolve conflicts (prefer session/HEAD side)"
+            claude_md+=$'\n'"  3. git add resolved files"
+            claude_md+=$'\n'"  4. git rebase --continue"
+            claude_md+=$'\n'"- When done, run: fin \"<brief description>\""
+            ;;
+        review)
+            claude_md="# Review Session"
+            claude_md+=$'\n\n'"You are reviewing pending changes in a claude-container session."
+            claude_md+=$'\n\n'"## Session: ${session}"
+            claude_md+=$'\n\n'"## Repos in workspace"
+            for r in "${repos[@]}"; do
+                claude_md+=$'\n'"- /workspace/$r"
+            done
+            claude_md+=$'\n\n'"## Instructions"
+            claude_md+=$'\n'"- This is a read-only review session"
+            claude_md+=$'\n'"- Discuss changes with the user"
+            claude_md+=$'\n'"- Do not make modifications unless explicitly asked"
+            ;;
+        exec)
+            claude_md="# Exec Session"
+            claude_md+=$'\n\n'"## Session: ${session}"
+            if [[ -n "$context" ]]; then
+                claude_md+=$'\n\n'"## Task"
+                claude_md+=$'\n'"$context"
+            fi
+            ;;
+        run)
+            claude_md="# Run Session (non-interactive)"
+            claude_md+=$'\n\n'"## Session: ${session}"
+            claude_md+=$'\n\n'"## Repos in workspace"
+            for r in "${repos[@]}"; do
+                claude_md+=$'\n'"- /workspace/$r"
+            done
+            claude_md+=$'\n\n'"## Instructions"
+            claude_md+=$'\n'"- You are running in non-interactive (print) mode"
+            claude_md+=$'\n'"- Complete the requested task and produce output"
+            claude_md+=$'\n'"- Do not ask questions — work autonomously"
+            ;;
+        work|*)
+            claude_md="# Claude Container Session"
+            claude_md+=$'\n\n'"## Session: ${session}"
+            claude_md+=$'\n\n'"## Repos in workspace"
+            for r in "${repos[@]}"; do
+                claude_md+=$'\n'"- /workspace/$r"
+            done
+            claude_md+=$'\n\n'"## Session Commands"
+            claude_md+=$'\n'"- \`fin \"<description>\"\` — Signal completion and terminate session"
+            ;;
+    esac
+
+    # Write CLAUDE.md to workspace root (don't overwrite existing user CLAUDE.md)
+    if [[ ! -f /workspace/CLAUDE.md ]]; then
+        echo "$claude_md" > /workspace/CLAUDE.md 2>/dev/null || true
+    fi
+}
+
+# Only inject CLAUDE.md when AGENT_TASK is set
+if [[ -n "${AGENT_TASK:-}" ]]; then
+    _inject_claude_md
+fi
+
+# ============================================================================
+# Phase 3: Resolve Working Directory & Launch
+# ============================================================================
+
+WORK_DIR="/workspace"
+if [[ -f /workspace/.main-project ]]; then
+    MAIN_PROJ=$(cat /workspace/.main-project)
+    if [[ -d "/workspace/$MAIN_PROJ" ]]; then
+        WORK_DIR="/workspace/$MAIN_PROJ"
+    fi
+fi
+
+# Build claude args
+CLAUDE_CMD_ARGS=""
+
+if [[ "${RUN_AS_USER:-}" == "1" ]] || [[ "${RUN_AS_ROOTISH:-}" == "1" ]]; then
+    CLAUDE_CMD_ARGS="--dangerously-skip-permissions"
+fi
+
+# Run mode: use -p (print/non-interactive) and decode prompt from AGENT_PROMPT
+if [[ "${AGENT_TASK:-}" == "run" ]]; then
+    CLAUDE_CMD_ARGS="-p $CLAUDE_CMD_ARGS"
+    if [[ -n "${AGENT_PROMPT:-}" ]]; then
+        CLAUDE_INITIAL_PROMPT=$(echo "$AGENT_PROMPT" | base64 -d 2>/dev/null || echo "$AGENT_PROMPT" | base64 -D 2>/dev/null || echo "$AGENT_PROMPT")
+    fi
+fi
+
+if [[ "${CONTINUE_SESSION:-}" == "1" ]]; then
+    CLAUDE_CMD_ARGS="--continue $CLAUDE_CMD_ARGS"
+fi
+
+# Decode passthrough args
+if [[ -n "${CLAUDE_PASSTHROUGH_ARGS:-}" ]]; then
+    PASSTHROUGH_DECODED=$(echo "$CLAUDE_PASSTHROUGH_ARGS" | base64 -d 2>/dev/null || echo "$CLAUDE_PASSTHROUGH_ARGS" | base64 -D 2>/dev/null)
+    while IFS= read -r arg; do
+        if [[ -n "$arg" ]]; then
+            if [[ "$arg" =~ \  ]]; then
+                CLAUDE_CMD_ARGS="$CLAUDE_CMD_ARGS \"$arg\""
+            else
+                CLAUDE_CMD_ARGS="$CLAUDE_CMD_ARGS $arg"
+            fi
+        fi
+    done <<< "$PASSTHROUGH_DECODED"
+fi
+
+# Check for merge-into or sync summary to use as initial prompt
+CLAUDE_INITIAL_PROMPT=""
+if [[ -f /workspace/.merge-into-summary ]]; then
+    CLAUDE_INITIAL_PROMPT=$(cat /workspace/.merge-into-summary)
+    rm -f /workspace/.merge-into-summary 2>/dev/null || true
+elif [[ -f /workspace/.sync-summary ]]; then
+    CLAUDE_INITIAL_PROMPT=$(cat /workspace/.sync-summary)
+    rm -f /workspace/.sync-summary 2>/dev/null || true
+fi
+
+# Launch via agent wrapper
+cd "$WORK_DIR" || cd /workspace
+
+if [[ -n "$CLAUDE_INITIAL_PROMPT" ]]; then
+    echo "$CLAUDE_INITIAL_PROMPT" > /tmp/.claude-initial-prompt
+    exec /usr/local/bin/cc-agent-run $CLAUDE_CMD_ARGS "$(cat /tmp/.claude-initial-prompt)"
+else
+    exec /usr/local/bin/cc-agent-run $CLAUDE_CMD_ARGS
+fi

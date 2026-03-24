@@ -8,11 +8,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use claude_container::lifecycle::Lifecycle;
-use claude_container::session::SessionManager;
-use claude_container::sync::SyncEngine;
-use claude_container::types::docker::DockerState;
-use claude_container::types::{ImageRef, SessionName};
+use git_sandbox::lifecycle::Lifecycle;
+use git_sandbox::session::SessionManager;
+use git_sandbox::sync::SyncEngine;
+use git_sandbox::types::docker::DockerState;
+use git_sandbox::types::{ImageRef, SessionName};
 
 // ============================================================================
 // Helpers
@@ -284,7 +284,7 @@ async fn test_discover_existing_session() {
     assert!(
         !matches!(
             discovered,
-            claude_container::types::DiscoveredSession::DoesNotExist(_)
+            git_sandbox::types::DiscoveredSession::DoesNotExist(_)
         ),
         "synapse-cc-ux should exist (Running, Stopped, or VolumesOnly), got {:?}",
         discovered
@@ -305,7 +305,7 @@ async fn test_discover_nonexistent_session() {
     assert!(
         matches!(
             discovered,
-            claude_container::types::DiscoveredSession::DoesNotExist(_)
+            git_sandbox::types::DiscoveredSession::DoesNotExist(_)
         ),
         "{} should be DoesNotExist, got {:?}",
         name,
@@ -540,13 +540,13 @@ async fn test_classify_repo() {
         // sync_decision should return a valid variant (not panic)
         let decision = pair.sync_decision();
         match &decision {
-            claude_container::types::SyncDecision::Skip { .. }
-            | claude_container::types::SyncDecision::Pull { .. }
-            | claude_container::types::SyncDecision::Push { .. }
-            | claude_container::types::SyncDecision::Reconcile { .. }
-            | claude_container::types::SyncDecision::CloneToHost
-            | claude_container::types::SyncDecision::PushToContainer
-            | claude_container::types::SyncDecision::Blocked { .. } => {}
+            git_sandbox::types::SyncDecision::Skip { .. }
+            | git_sandbox::types::SyncDecision::Pull { .. }
+            | git_sandbox::types::SyncDecision::Push { .. }
+            | git_sandbox::types::SyncDecision::Reconcile { .. }
+            | git_sandbox::types::SyncDecision::CloneToHost
+            | git_sandbox::types::SyncDecision::PushToContainer
+            | git_sandbox::types::SyncDecision::Blocked { .. } => {}
         }
 
         classified_any = true;
