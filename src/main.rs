@@ -548,12 +548,20 @@ async fn cmd_start(
     }
 
     // Step 2: Resolve image — use provided dockerfile, or fall back to session metadata
-    let effective_dockerfile = dockerfile.clone().or_else(|| {
-        let sm2 = session::SessionManager::new(lc.docker_client().clone());
-        sm2.load_metadata(name)
-            .and_then(|m| m.dockerfile)
-            .filter(|df| !df.as_os_str().is_empty() && df.exists())
-    });
+    let effective_dockerfile = dockerfile.clone()
+        // 1. Check session metadata
+        .or_else(|| {
+            let sm2 = session::SessionManager::new(lc.docker_client().clone());
+            sm2.load_metadata(name)
+                .and_then(|m| m.dockerfile)
+                .filter(|df| !df.as_os_str().is_empty() && df.exists())
+        })
+        // 2. Check cwd for Dockerfile
+        .or_else(|| {
+            let cwd = std::env::current_dir().ok()?;
+            let candidate = cwd.join("Dockerfile");
+            if candidate.exists() { Some(candidate) } else { None }
+        });
 
     let image = if let Some(ref df) = effective_dockerfile {
         let df_path = if df.is_dir() {
