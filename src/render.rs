@@ -410,7 +410,7 @@ pub fn sync_result(result: &crate::types::SyncResult) {
         match r {
             RepoSyncResult::Pulled { repo_name, extract, merge } => {
                 println!(
-                    "  {} {} — extracted {} commit(s), {:?}",
+                    "  {} {} — extracted {} commit(s), {}",
                     "✓".green(), repo_name, extract.commit_count, merge
                 );
             }

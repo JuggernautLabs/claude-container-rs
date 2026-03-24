@@ -564,11 +564,13 @@ async fn cmd_start(
         };
         let image_name = format!("claude-dev-{}", name);
         let image_ref = ImageRef::new(&image_name);
-        eprintln!("  Building image: {}", image_name);
+        eprintln!("  image: {} (from {})", colored::Colorize::blue(image_name.as_str()), colored::Colorize::dimmed(df_path.display().to_string().as_str()));
         lc.build_image(&image_ref, &df_path, &df_path.parent().unwrap_or(&PathBuf::from("."))).await?;
         image_ref
     } else {
-        ImageRef::new("ghcr.io/hypermemetic/claude-container:latest")
+        let default_image = "ghcr.io/hypermemetic/claude-container:latest";
+        eprintln!("  image: {} {}", default_image, colored::Colorize::dimmed("(default)"));
+        ImageRef::new(default_image)
     };
 
     // Step 3: Verified pipeline
@@ -1444,7 +1446,7 @@ async fn cmd_pull(name: &SessionName, branch: &str, filter: Option<&str>, includ
             for (repo_name, host_path) in &pending_merge_repos {
                 match engine.merge(host_path, &session_branch, branch, squash) {
                     Ok(outcome) => {
-                        eprintln!("  {} {} — {:?}", colored::Colorize::green("✓"), repo_name, outcome);
+                        eprintln!("  {} {} — {}", colored::Colorize::green("✓"), repo_name, outcome);
                     }
                     Err(e) => {
                         eprintln!("  {} {} — {}", colored::Colorize::red("✗"), repo_name, e);
@@ -1491,7 +1493,7 @@ async fn cmd_pull(name: &SessionName, branch: &str, filter: Option<&str>, includ
                             match engine.extract(name, &dinfo.repo_name, host_path, &session_branch).await {
                                 Ok(_extract) => {
                                     match engine.merge(host_path, &session_branch, branch, squash) {
-                                        Ok(outcome) => eprintln!("    {} auto-merged ({:?})", colored::Colorize::green("✓"), outcome),
+                                        Ok(outcome) => eprintln!("    {} auto-merged ({})", colored::Colorize::green("✓"), outcome),
                                         Err(e) => eprintln!("    {} merge failed: {}", colored::Colorize::red("✗"), e),
                                     }
                                 }
@@ -1670,7 +1672,7 @@ async fn offer_reconciliation(
                     eprintln!("    {} {} — {} commit(s)", colored::Colorize::green("✓"), repo_name, extract.commit_count);
                     // Merge the resolved work
                     match engine.merge(host_path, &session_branch, branch, true) {
-                        Ok(outcome) => eprintln!("    {} {} — {:?}", colored::Colorize::green("✓"), repo_name, outcome),
+                        Ok(outcome) => eprintln!("    {} {} — {}", colored::Colorize::green("✓"), repo_name, outcome),
                         Err(e) => eprintln!("    {} {} — merge failed: {}", colored::Colorize::red("✗"), repo_name, e),
                     }
                 }

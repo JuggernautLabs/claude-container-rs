@@ -362,10 +362,15 @@ impl Lifecycle {
         );
 
         let mut last_id = None;
+        let is_tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
         while let Some(result) = stream.next().await {
             match result {
                 Ok(info) => {
                     if let Some(ref error) = info.error {
+                        // Clear the progress line before printing the error
+                        if is_tty {
+                            eprint!("\r\x1b[K");
+                        }
                         return Err(ContainerError::DockerUnavailable(format!(
                             "Build failed: {}",
                             error
@@ -375,9 +380,29 @@ impl Lifecycle {
                     if let Some(ref id) = info.id {
                         last_id = Some(id.clone());
                     }
+                    // Single-line scrolling progress: overwrite the current line
+                    if is_tty {
+                        if let Some(ref stream_text) = info.stream {
+                            let line = stream_text.trim();
+                            if !line.is_empty() {
+                                // Truncate to terminal width (80 cols as safe default)
+                                let max_width = 80usize;
+                                let display = if line.len() > max_width {
+                                    &line[..max_width]
+                                } else {
+                                    line
+                                };
+                                eprint!("\r\x1b[K  {}", display);
+                            }
+                        }
+                    }
                 }
                 Err(e) => return Err(ContainerError::Docker(e)),
             }
+        }
+        // Clear the progress line after build completes
+        if is_tty {
+            eprint!("\r\x1b[K");
         }
 
         // After building, inspect to get the definitive image ID

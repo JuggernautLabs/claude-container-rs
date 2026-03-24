@@ -596,22 +596,15 @@ impl SyncEngine {
         ).await;
 
         // Script: cd into the repo inside /session, create bundle
-        // Bundle only HEAD (targeted) instead of --all to avoid bundling entire history.
-        // If HEAD is detached, checkout the default branch first so the bundle has a ref.
+        // Use --all to bundle everything (handles detached HEAD, any branch)
         let script = format!(
             r#"
 set -e
 git config --global --add safe.directory "*"
 cd "/session/{repo_name}" || {{ echo "FAIL: repo not found at /session/{repo_name}"; exit 1; }}
 echo "HEAD=$(git rev-parse HEAD)"
-BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "")
-echo "branch=${{BRANCH:-detached}}"
-if [ -z "$BRANCH" ]; then
-    # Detached HEAD — try to checkout default branch pointing at this commit
-    DEFAULT=$(git config --get init.defaultBranch 2>/dev/null || echo main)
-    git checkout -B "$DEFAULT" HEAD 2>/dev/null || true
-fi
-git bundle create /bundles/repo.bundle HEAD 2>&1
+echo "branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo detached)"
+git bundle create /bundles/repo.bundle --all 2>&1
 echo "BUNDLE_OK"
 "#,
             repo_name = repo_name,
@@ -705,21 +698,13 @@ echo "BUNDLE_OK"
 
         let bundle_path_str = bundle_host_path.to_string_lossy().to_string();
 
-        // Record old session branch HEAD before updating — needed for accurate commit counting
-        let session_ref = format!("refs/heads/{}", session_branch);
-        let old_session_oid = repo
-            .find_reference(&session_ref)
-            .ok()
-            .and_then(|r| r.peel_to_commit().ok())
-            .map(|c| c.id());
-
         // Use git CLI to fetch — libgit2 bundle support is flaky
         let fetch_output = std::process::Command::new("git")
             .args(["-C", &host_path.to_string_lossy(), "fetch", &bundle_path_str, "HEAD"])
             .output()
             .map_err(|e| ContainerError::Io(e))?;
 
-        let used_bundle_fallback = if !fetch_output.status.success() {
+        if !fetch_output.status.success() {
             // Try fetching all refs instead of HEAD
             let fetch_all = std::process::Command::new("git")
                 .args(["-C", &host_path.to_string_lossy(), "fetch", &bundle_path_str, "+refs/*:refs/cc-bundle/*"])
@@ -733,10 +718,7 @@ echo "BUNDLE_OK"
                     reason: format!("git fetch from bundle failed: {}", stderr.lines().last().unwrap_or("unknown")),
                 });
             }
-            true
-        } else {
-            false
-        };
+        }
 
         // Resolve FETCH_HEAD (set by git fetch)
         let fetch_head = repo.find_reference("FETCH_HEAD")
@@ -749,21 +731,14 @@ echo "BUNDLE_OK"
         let new_head = CommitHash::new(new_head_oid.to_string());
 
         // Create or update the session branch to point at FETCH_HEAD
+        let session_ref = format!("refs/heads/{}", session_branch);
         repo.reference(&session_ref, new_head_oid, true, "cc: extract from container")?;
 
-        // Count only NEW commits since old session branch head.
-        // If the session branch existed before, count from old HEAD to new HEAD.
-        // If no prior session branch (first extract), count all reachable commits.
-        let commit_count = if let Some(old_oid) = old_session_oid {
-            if old_oid == new_head_oid {
-                0 // Same commit — no new work
-            } else {
-                count_commits_between(&repo, old_oid, new_head_oid).unwrap_or(0)
-            }
-        } else {
-            // First extract — count all reachable commits (capped at 10000)
+        // Count commits (from merge base with current HEAD if it exists, else all)
+        let commit_count = {
             let mut revwalk = repo.revwalk()?;
             revwalk.push(new_head_oid)?;
+            // Try to limit the count to something reasonable
             revwalk.set_sorting(git2::Sort::TOPOLOGICAL)?;
             let mut count = 0u32;
             for oid_result in revwalk {
@@ -776,23 +751,6 @@ echo "BUNDLE_OK"
             }
             count
         };
-
-        // Clean up refs/cc-bundle/* if the fallback fetch created them
-        if used_bundle_fallback {
-            cleanup_bundle_refs(host_path);
-        }
-
-        // Log bundle size for diagnostics
-        if let Ok(meta) = std::fs::metadata(&bundle_host_path) {
-            let size_kb = meta.len() / 1024;
-            if size_kb > 1024 {
-                eprintln!(
-                    "cc: bundle for {} is {}MB",
-                    repo_name,
-                    size_kb / 1024,
-                );
-            }
-        }
 
         // bundle_dir drops here, cleaning up the temp directory
 
@@ -891,7 +849,13 @@ echo "BUNDLE_OK"
                     if repo.graph_descendant_of(session_oid, base_oid).unwrap_or(false) {
                         Some(base_oid)
                     } else {
-                        None // stale squash-base, ignore it
+                        // Stale squash-base: warn and fall back to merge-base
+                        eprintln!(
+                            "  warning: squash-base {} for {} is stale (not ancestor of session HEAD), falling back to merge-base",
+                            &c.id().to_string()[..7.min(c.id().to_string().len())],
+                            session_branch,
+                        );
+                        None
                     }
                 })
                 .or(merge_base_oid);
@@ -1365,7 +1329,7 @@ git remote remove _cc_upstream 2>/dev/null
                 SyncDecision::Skip { reason } => {
                     RepoSyncResult::Skipped {
                         repo_name: action.repo_name.clone(),
-                        reason: format!("{:?}", reason),
+                        reason: format!("{}", reason),
                     }
                 }
 
@@ -1497,7 +1461,7 @@ git remote remove _cc_upstream 2>/dev/null
                 SyncDecision::Blocked { reason } => {
                     RepoSyncResult::Skipped {
                         repo_name: action.repo_name.clone(),
-                        reason: format!("blocked: {:?}", reason),
+                        reason: format!("blocked: {}", reason),
                     }
                 }
             };
@@ -1774,43 +1738,6 @@ fn read_squash_state(
         SquashState::Active {
             base: squash_base,
             new_commits,
-        }
-    }
-}
-
-/// Delete all `refs/cc-bundle/*` refs from a repo.
-///
-/// These refs are created by the fallback fetch (`+refs/*:refs/cc-bundle/*`)
-/// during bundle extraction. They serve no purpose after the fetch and
-/// accumulate indefinitely if not cleaned up.
-fn cleanup_bundle_refs(repo_path: &Path) {
-    let output = match std::process::Command::new("git")
-        .args([
-            "-C",
-            &repo_path.to_string_lossy(),
-            "for-each-ref",
-            "--format=%(refname)",
-            "refs/cc-bundle/",
-        ])
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return, // best-effort cleanup
-    };
-
-    let refs = String::from_utf8_lossy(&output.stdout);
-    for refname in refs.lines() {
-        let refname = refname.trim();
-        if !refname.is_empty() {
-            let _ = std::process::Command::new("git")
-                .args([
-                    "-C",
-                    &repo_path.to_string_lossy(),
-                    "update-ref",
-                    "-d",
-                    refname,
-                ])
-                .output();
         }
     }
 }

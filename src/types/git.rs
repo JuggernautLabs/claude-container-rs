@@ -195,6 +195,16 @@ pub enum SkipReason {
     ExtractDisabled,
 }
 
+impl std::fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Identical => write!(f, "identical"),
+            Self::SquashIdentical => write!(f, "squash-identical"),
+            Self::ExtractDisabled => write!(f, "extract disabled"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum BlockReason {
     ContainerDirty(u32),
@@ -202,6 +212,18 @@ pub enum BlockReason {
     ContainerMerging,
     ContainerRebasing,
     HostNotARepo(PathBuf),
+}
+
+impl std::fmt::Display for BlockReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ContainerDirty(n) => write!(f, "{} dirty file(s) in container", n),
+            Self::HostDirty => write!(f, "host has uncommitted changes"),
+            Self::ContainerMerging => write!(f, "merge in progress in container"),
+            Self::ContainerRebasing => write!(f, "rebase in progress in container"),
+            Self::HostNotARepo(p) => write!(f, "host path not a git repo: {}", p.display()),
+        }
+    }
 }
 
 impl RepoPair {
@@ -364,7 +386,20 @@ impl std::fmt::Display for MergeOutcome {
             Self::CleanMerge => write!(f, "merge cleanly"),
             Self::Conflict { files } => write!(f, "conflict ({})", files.join(", ")),
             Self::CreateBranch { from } => write!(f, "create branch from {}", from),
-            Self::Blocked(b) => write!(f, "blocked: {:?}", b),
+            Self::Blocked(b) => write!(f, "blocked: {}", b),
+        }
+    }
+}
+
+impl std::fmt::Display for MergeBlocker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HostDirty => write!(f, "host has uncommitted changes"),
+            Self::NoSessionBranch => write!(f, "no session branch"),
+            Self::NoTargetBranch => write!(f, "no target branch"),
+            Self::ContainerDirty => write!(f, "container has uncommitted changes"),
+            Self::MergeInProgress => write!(f, "merge in progress"),
+            Self::RepoMissing => write!(f, "repo missing"),
         }
     }
 }
