@@ -113,9 +113,19 @@ fn render_session_common(
     }
 }
 
-/// Render a sync plan — matches the bash claude-container UX.
-pub fn sync_plan(plan: &SessionSyncPlan) {
-    rule(Some(&format!("pull: {} → {}", plan.session_name, plan.target_branch)));
+/// Render a sync plan with a specific direction label.
+pub fn sync_plan_directed(plan: &SessionSyncPlan, direction: &str) {
+    let label = match direction {
+        "push" => format!("push: {} ← {}", plan.target_branch, plan.session_name),
+        "status" => format!("status: {} ↔ {}", plan.session_name, plan.target_branch),
+        "sync" => format!("sync: {} ↔ {}", plan.session_name, plan.target_branch),
+        _ => format!("pull: {} → {}", plan.session_name, plan.target_branch),
+    };
+    sync_plan_inner(plan, &label);
+}
+
+fn sync_plan_inner(plan: &SessionSyncPlan, label: &str) {
+    rule(Some(label));
 
     // Classify actions into groups
     let mut ready: Vec<&RepoSyncAction> = Vec::new();       // clean pull/clone

@@ -1222,7 +1222,7 @@ async fn cmd_session_set_dir(name: &SessionName, target: Option<&str>) -> anyhow
 
 async fn cmd_sync_preview(name: &SessionName, branch: &str, filter: Option<&str>) -> anyhow::Result<()> {
     let (_lc, _engine, plan, _repo_paths) = build_sync_plan(name, branch, filter, false).await?;
-    render::sync_plan(&plan.action);
+    render::sync_plan_directed(&plan.action, "status");
     Ok(())
 }
 
@@ -1420,7 +1420,7 @@ async fn cmd_pull(name: &SessionName, branch: &str, filter: Option<&str>, includ
         })
         .collect();
 
-    render::sync_plan(&plan.action);
+    render::sync_plan_directed(&plan.action, "pull");
 
     if dry_run || (!has_clean && diverged_repos.is_empty() && pending_merge_repos.is_empty()) {
         return Ok(());
@@ -1532,7 +1532,7 @@ async fn cmd_push(name: &SessionName, branch: &str, filter: Option<&str>, includ
         types::SyncDecision::Push { .. } | types::SyncDecision::PushToContainer
     ));
 
-    render::sync_plan(&plan.action);
+    render::sync_plan_directed(&plan.action, "push");
 
     if dry_run || !has_pushes {
         return Ok(());
@@ -1554,7 +1554,7 @@ async fn cmd_sync(name: &SessionName, branch: &str, filter: Option<&str>, includ
 
     let has_work = plan.action.has_work();
 
-    render::sync_plan(&plan.action);
+    render::sync_plan_directed(&plan.action, "sync");
 
     if dry_run || !has_work {
         return Ok(());
