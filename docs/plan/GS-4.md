@@ -61,3 +61,16 @@ fn confirm_defaults_to_yes_on_empty_input() {
 - `rebuild` only removes container after successful image build
 - Partial sync failures are clearly reported with what succeeded
 - `--yes` consistently skips all prompts across all commands
+
+## Outcome
+
+**Status:** DONE
+
+**Key code changes:**
+- `src/main.rs`: cmd_session_stop takes auto_yes, prompts before stopping
+- `src/main.rs`: cmd_session_rebuild builds image BEFORE removing container
+- `src/types/action.rs`: Added SyncResult::is_partial() method
+
+**Tests:** 10 in safety_test.rs
+
+**Bugs found:** None

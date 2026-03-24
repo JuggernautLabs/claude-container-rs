@@ -68,3 +68,16 @@ fn triple_container_ahead_and_session_ahead_of_target() {
 - `pull -s foo main` correctly shows "extract + merge" when container has new work
 - No separate `session_ahead_of_target` field — all state is in the triple
 - All 6 triple test cases pass
+
+## Outcome
+
+**Status:** DONE
+
+**Key code changes:**
+- `src/types/git.rs`: Added SessionTargetRelation struct, MergeToTarget variant, maybe_merge_to_target() method
+- `src/sync/mod.rs`: classify_repo() computes full triple, added read_target_state()
+- `src/types/action.rs`: Removed session_ahead_of_target workaround from RepoSyncAction
+
+**Tests:** 6 in triple_test.rs
+
+**Bugs found:** Squash-merge creates content-identical trees with different SHAs. Fixed by checking ContentComparison::Identical in maybe_merge_to_target().

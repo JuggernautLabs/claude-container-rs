@@ -61,3 +61,17 @@ async fn cleanup_removes_session_throwaway_containers() {
 - `session gc` removes all orphaned throwaway containers
 - `ls --active` shows only sessions with volumes
 - All throwaway containers are labeled for discovery
+
+## Outcome
+
+**Status:** DONE
+
+**Key code changes:**
+- All throwaway containers labeled claude-container.throwaway=true
+- `src/main.rs`: gc command removes orphaned throwaway containers
+- `src/main.rs`: ls --active filters metadata-only ghosts
+- Session cleanup also removes session-scoped throwaway containers
+
+**Tests:** 3 unit + 7 integration in cleanup_test.rs
+
+**Bugs found:** None

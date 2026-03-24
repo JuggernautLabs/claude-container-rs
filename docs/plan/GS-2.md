@@ -49,3 +49,17 @@ fn inject_failed_is_distinct_from_extraction() {
 - No `.contains("Conflict")` or `.contains("conflict")` anywhere in main.rs
 - All sync error types are exhaustively matchable
 - Conflict file lists propagate through the error chain
+
+## Outcome
+
+**Status:** DONE
+
+**Key code changes:**
+- `src/types/error.rs`: Added MergeConflict, BundleFailed, FetchFailed, BranchCreateFailed, InjectionFailed error variants
+- `src/types/action.rs`: Added RepoSyncResult::Conflicted { repo_name, files } variant
+- `src/sync/mod.rs`: extract/merge/inject return typed errors instead of string-based errors
+- `src/main.rs`: collect_conflicts() uses pattern matching, zero string matching
+
+**Tests:** 5 in error_types_test.rs
+
+**Bugs found:** None

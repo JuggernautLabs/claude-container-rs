@@ -58,3 +58,16 @@ async fn extract_handles_large_repo() {
 - Commit counts match `git rev-list --count session..HEAD`
 - No orphaned refs after extract
 - Bundle only contains needed refs (not full history)
+
+## Outcome
+
+**Status:** DONE
+
+**Key code changes:**
+- `src/sync/mod.rs` extract(): Counts only new commits via old_session_oid delta
+- `src/sync/mod.rs`: Added cleanup_bundle_refs() to remove refs/cc-bundle/*
+- `src/sync/mod.rs`: Bundle uses HEAD not --all, handles detached HEAD
+
+**Tests:** 7 unit + 6 integration in extract_test.rs
+
+**Bugs found:** None

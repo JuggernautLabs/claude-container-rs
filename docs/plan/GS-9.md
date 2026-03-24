@@ -55,3 +55,17 @@ fn write_config_handles_special_yaml() {
 - `session exec ls -la /path/with spaces/` works correctly
 - No shell injection possible through any user input
 - base64 encoding is pure Rust, no shell dependency
+
+## Outcome
+
+**Status:** DONE
+
+**Key code changes:**
+- `src/shell_safety.rs`: New module with build_exec_cmd(), base64_encode/decode(), write_config_script()
+- base64 crate replaces shelling out to /usr/bin/base64
+- Session exec uses proper command building, not join(" ")
+- write_config uses base64 pipe instead of shell echo with quote escaping
+
+**Tests:** 11 in shell_safety_test.rs
+
+**Bugs found:** None

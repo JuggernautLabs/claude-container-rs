@@ -54,3 +54,16 @@ fn reconciliation_detects_unresolved() {
 - Zero string matching for conflict detection
 - Agentic reconciliation triggers reliably from typed errors
 - Post-reconciliation verifies work was completed
+
+## Outcome
+
+**Status:** DONE
+
+**Key code changes:**
+- `src/container/mod.rs`: check_reconcile_complete returns Option<String>
+- `src/main.rs`: resolve_token() and build_launch_proofs() shared helpers extracted
+- `src/main.rs`: Post-reconciliation verifies extract+merge success
+
+**Tests:** 12 in reconciliation_test.rs
+
+**Bugs found:** None

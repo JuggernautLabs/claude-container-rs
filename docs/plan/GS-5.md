@@ -61,3 +61,16 @@ fn role_dependency_implies_no_extract() {
 - `--continue` resumes previous Claude conversation
 - `--squash false` creates merge commits
 - No dead code in flag handling
+
+## Outcome
+
+**Status:** DONE
+
+**Key code changes:**
+- `src/container/mod.rs`: LaunchOptions struct, --continue sets CONTINUE_SESSION=1, --prompt sets CLAUDE_INITIAL_PROMPT
+- `src/types/config.rs`: Removed extract field, role replaces it
+- `src/main.rs`: --squash flag threaded through to engine.merge()
+
+**Tests:** 8 in flags_test.rs (1 failing: squash_false_uses_merge_commit needs diverged history fix)
+
+**Bugs found:** None
