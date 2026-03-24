@@ -571,24 +571,9 @@ async fn cmd_start(
         ImageRef::new("ghcr.io/hypermemetic/claude-container:latest")
     };
 
-    // Step 3: Verified pipeline
-    let docker = container::verify_docker(&lc).await?;
-    let verified_image = container::verify_image(&lc, &docker, &image).await?;
-    for tool in verified_image.validation.missing_optional() {
-        eprintln!("  {} {} (optional)", colored::Colorize::yellow("⚠"), tool);
-    }
-    let volumes = container::verify_volumes(&lc, &docker, name).await?;
-
-    // Token — find it from env, file, or keychain
-    let token = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
-        .or_else(|_| {
-            let token_file = dirs::home_dir()
-                .unwrap_or_default()
-                .join(".config/claude-container/token");
-            std::fs::read_to_string(&token_file)
-        })
-        .map_err(|_| anyhow::anyhow!("No auth token found. Set CLAUDE_CODE_OAUTH_TOKEN or create ~/.config/claude-container/token"))?;
-    let verified_token = container::verify_token(&lc, token.trim())?;
+    // Step 3: Verified pipeline (shared with offer_reconciliation)
+    let (docker, verified_image, volumes, verified_token) =
+        build_launch_proofs(&lc, name, &image).await?;
 
     // Materialize embedded scripts to cache dir for Docker bind-mounts
     let script_dir = scripts::materialize()?;
@@ -655,24 +640,9 @@ async fn cmd_run(
         ImageRef::new("ghcr.io/hypermemetic/claude-container:latest")
     };
 
-    // Step 2: Verified pipeline (same as cmd_start)
-    let docker = container::verify_docker(&lc).await?;
-    let verified_image = container::verify_image(&lc, &docker, &image).await?;
-    for tool in verified_image.validation.missing_optional() {
-        eprintln!("  {} {} (optional)", colored::Colorize::yellow("⚠"), tool);
-    }
-    let volumes = container::verify_volumes(&lc, &docker, name).await?;
-
-    // Token
-    let token = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
-        .or_else(|_| {
-            let token_file = dirs::home_dir()
-                .unwrap_or_default()
-                .join(".config/claude-container/token");
-            std::fs::read_to_string(&token_file)
-        })
-        .map_err(|_| anyhow::anyhow!("No auth token found. Set CLAUDE_CODE_OAUTH_TOKEN or create ~/.config/claude-container/token"))?;
-    let verified_token = container::verify_token(&lc, token.trim())?;
+    // Step 2: Verified pipeline (shared with cmd_start and offer_reconciliation)
+    let (docker, verified_image, volumes, verified_token) =
+        build_launch_proofs(&lc, name, &image).await?;
 
     // Materialize embedded scripts to cache dir for Docker bind-mounts
     let script_dir = scripts::materialize()?;
@@ -1589,6 +1559,44 @@ fn collect_conflicts(
     }).collect()
 }
 
+/// Resolve auth token from env var or file.
+/// Shared between cmd_start, cmd_run, and offer_reconciliation.
+fn resolve_token() -> anyhow::Result<String> {
+    std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
+        .or_else(|_| {
+            let token_file = dirs::home_dir()
+                .unwrap_or_default()
+                .join(".config/claude-container/token");
+            std::fs::read_to_string(&token_file)
+        })
+        .map(|t| t.trim().to_string())
+        .map_err(|_| anyhow::anyhow!("No auth token found. Set CLAUDE_CODE_OAUTH_TOKEN or create ~/.config/claude-container/token"))
+}
+
+/// Build launch proofs: verify docker, image, volumes, and token.
+/// Shared pipeline used by cmd_start, cmd_run, and offer_reconciliation.
+async fn build_launch_proofs(
+    lc: &lifecycle::Lifecycle,
+    name: &SessionName,
+    image: &ImageRef,
+) -> anyhow::Result<(
+    types::verified::Verified<types::verified::DockerAvailable>,
+    types::verified::Verified<types::verified::ValidImage>,
+    types::verified::Verified<types::verified::VolumesReady>,
+    types::verified::Verified<types::verified::TokenReady>,
+)> {
+    let docker = container::verify_docker(lc).await?;
+    let verified_image = container::verify_image(lc, &docker, image).await?;
+    for tool in verified_image.validation.missing_optional() {
+        eprintln!("  {} {} (optional)", colored::Colorize::yellow("⚠"), tool);
+    }
+    let volumes = container::verify_volumes(lc, &docker, name).await?;
+    let token = resolve_token()?;
+    let verified_token = container::verify_token(lc, &token)?;
+
+    Ok((docker, verified_image, volumes, verified_token))
+}
+
 /// Offer agentic reconciliation: launch Claude to resolve merge conflicts.
 async fn offer_reconciliation(
     lc: &lifecycle::Lifecycle,
@@ -1622,21 +1630,10 @@ async fn offer_reconciliation(
         return Ok(());
     }
 
-    // Build verification proofs for container launch
-    let docker = container::verify_docker(lc).await?;
+    // Build verification proofs using shared pipeline
     let image_ref = ImageRef::new("ghcr.io/hypermemetic/claude-container:latest");
-    let verified_image = container::verify_image(lc, &docker, &image_ref).await?;
-    let volumes = container::verify_volumes(lc, &docker, name).await?;
-
-    let token = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
-        .or_else(|_| {
-            let token_file = dirs::home_dir()
-                .unwrap_or_default()
-                .join(".config/claude-container/token");
-            std::fs::read_to_string(&token_file)
-        })
-        .map_err(|_| anyhow::anyhow!("No auth token"))?;
-    let verified_token = container::verify_token(lc, token.trim())?;
+    let (docker, verified_image, volumes, verified_token) =
+        build_launch_proofs(lc, name, &image_ref).await?;
 
     let ready = types::verified::LaunchReady {
         docker,
@@ -1651,16 +1648,22 @@ async fn offer_reconciliation(
     eprintln!();
     std::io::stderr().flush().ok();
 
-    let reconciled = container::launch_reconciliation(
+    let reconcile_result = container::launch_reconciliation(
         lc, ready, name, &script_dir, conflicts,
     ).await?;
 
-    if reconciled {
+    if let Some(description) = reconcile_result {
         eprintln!();
-        eprintln!("  {} Reconciliation complete. Re-extracting...", colored::Colorize::green("✓"));
+        if description.is_empty() {
+            eprintln!("  {} Reconciliation complete. Re-extracting...", colored::Colorize::green("✓"));
+        } else {
+            eprintln!("  {} Reconciliation complete: {}. Re-extracting...",
+                colored::Colorize::green("✓"), description);
+        }
 
-        // Re-extract the resolved repos
+        // Re-extract the resolved repos and verify each succeeds
         let engine = sync::SyncEngine::new(lc.docker_client().clone());
+        let mut all_succeeded = true;
         for (repo_name, host_path, _) in conflicts {
             let session_branch = name.to_string();
             match engine.extract(name, repo_name, host_path, &session_branch).await {
@@ -1669,11 +1672,26 @@ async fn offer_reconciliation(
                     // Merge the resolved work
                     match engine.merge(host_path, &session_branch, branch, true) {
                         Ok(outcome) => eprintln!("    {} {} — {:?}", colored::Colorize::green("✓"), repo_name, outcome),
-                        Err(e) => eprintln!("    {} {} — merge failed: {}", colored::Colorize::red("✗"), repo_name, e),
+                        Err(e) => {
+                            eprintln!("    {} {} — merge failed: {}", colored::Colorize::red("✗"), repo_name, e);
+                            all_succeeded = false;
+                        }
                     }
                 }
-                Err(e) => eprintln!("    {} {} — extract failed: {}", colored::Colorize::red("✗"), repo_name, e),
+                Err(e) => {
+                    eprintln!("    {} {} — extract failed: {}", colored::Colorize::red("✗"), repo_name, e);
+                    all_succeeded = false;
+                }
             }
+        }
+
+        if all_succeeded {
+            eprintln!();
+            eprintln!("  {} All conflicts resolved and merged.", colored::Colorize::green("✓"));
+        } else {
+            eprintln!();
+            eprintln!("  {} Reconciliation partially failed. Some repos need manual attention.",
+                colored::Colorize::yellow("⚠"));
         }
     } else {
         eprintln!();

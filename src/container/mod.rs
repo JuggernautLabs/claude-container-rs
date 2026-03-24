@@ -385,14 +385,14 @@ fn terminal_size() -> (u16, u16) {
 ///   - Claude sees CLAUDE.md with conflict details
 ///   - User interacts until Claude calls `fin "description"`
 ///
-/// Returns true if reconciliation completed (.reconcile-complete exists).
+/// Returns Some(description) if reconciliation completed, None if Claude exited without finishing.
 pub async fn launch_reconciliation(
     lc: &Lifecycle,
     ready: LaunchReady,
     session_name: &SessionName,
     script_dir: &Path,
     conflict_repos: &[(String, std::path::PathBuf, Vec<String>)], // (name, host_path, conflict_files)
-) -> Result<bool, ContainerError> {
+) -> Result<Option<String>, ContainerError> {
     let container_name = session_name.container_name();
 
     // Remove existing container — reconciliation always gets a fresh one
@@ -443,11 +443,12 @@ pub async fn launch_reconciliation(
     Ok(check)
 }
 
-/// Check if .reconcile-complete exists in the session volume
+/// Check if .reconcile-complete exists in the session volume.
+/// Returns Some(description) if reconciliation completed, None otherwise.
 async fn check_reconcile_complete(
     lc: &Lifecycle,
     session: &SessionName,
-) -> bool {
+) -> Option<String> {
     let volume = session.session_volume();
     let container_name = format!("cc-check-reconcile-{}", session);
     let docker = lc.docker_client();
@@ -472,7 +473,7 @@ async fn check_reconcile_complete(
         Some(bollard::container::CreateContainerOptions { name: container_name.as_str(), platform: None }),
         config,
     ).await;
-    if create.is_err() { return false; }
+    if create.is_err() { return None; }
 
     let _ = docker.start_container(
         &container_name,
@@ -503,7 +504,11 @@ async fn check_reconcile_complete(
         Some(bollard::container::RemoveContainerOptions { force: true, ..Default::default() }),
     ).await;
 
-    !stdout.contains("__NONE__")
+    if stdout.contains("__NONE__") {
+        None
+    } else {
+        Some(stdout.trim().to_string())
+    }
 }
 
 /// Public entry point: attach to an already-running container.
