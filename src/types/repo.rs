@@ -10,8 +10,6 @@ pub struct RepoConfig {
     pub name: String,
     /// Host path
     pub host_path: PathBuf,
-    /// Whether extraction is enabled (false = discovered repo)
-    pub extract_enabled: bool,
     /// Branch to clone from (None = current HEAD branch)
     pub branch: Option<String>,
 }

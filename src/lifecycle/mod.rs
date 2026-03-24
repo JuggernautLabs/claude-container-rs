@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use bollard::container::{
     Config, CreateContainerOptions, RemoveContainerOptions, StartContainerOptions,
@@ -29,6 +30,9 @@ use crate::types::error::ContainerError;
 use crate::types::image::{CRITICAL_BINARIES, OPTIONAL_BINARIES};
 
 type Result<T> = std::result::Result<T, ContainerError>;
+
+/// How long a validation cache entry is considered fresh (24 hours).
+pub const VALIDATION_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 // ============================================================================
 // Container creation arguments
@@ -763,40 +767,11 @@ impl Lifecycle {
     }
 
     /// Load a cached image validation result.
+    ///
+    /// Returns `None` if the cache file is missing, older than [`VALIDATION_CACHE_TTL`],
+    /// or unparseable.
     fn load_validation_cache(&self, image_id: &str, image: &ImageRef) -> Option<ImageValidation> {
-        let cache_path = validation_cache_path(image_id)?;
-        let content = std::fs::read_to_string(&cache_path).ok()?;
-
-        // Cache format: one line per binary, "name:critical|optional:ok|missing"
-        let mut critical = Vec::new();
-        let mut optional = Vec::new();
-
-        for line in content.lines() {
-            let parts: Vec<&str> = line.split(':').collect();
-            if parts.len() != 3 {
-                continue;
-            }
-            let check = BinaryCheck {
-                name: parts[0].to_string(),
-                present: parts[2] == "ok",
-                functional: parts[2] == "ok",
-            };
-            match parts[1] {
-                "critical" => critical.push(check),
-                "optional" => optional.push(check),
-                _ => {}
-            }
-        }
-
-        if critical.is_empty() {
-            return None;
-        }
-
-        Some(ImageValidation {
-            image: image.clone(),
-            critical,
-            optional,
-        })
+        load_validation_cache_standalone(image_id, image)
     }
 
     /// Persist an image validation result to cache.
@@ -941,14 +916,63 @@ fn check_container_staleness(
 }
 
 /// Hash a string with SHA-256 and return the hex digest.
-fn hash_string(s: &str) -> String {
+pub fn hash_string(s: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(s.as_bytes());
     hex::encode(hasher.finalize())
 }
 
+/// Load a cached image validation result (standalone, no `Lifecycle` needed).
+///
+/// Checks file modification time against [`VALIDATION_CACHE_TTL`].
+/// Returns `None` if the cache is expired, missing, or corrupt.
+pub fn load_validation_cache_standalone(image_id: &str, image: &ImageRef) -> Option<ImageValidation> {
+    let cache_path = validation_cache_path(image_id)?;
+
+    // Check file mtime against TTL
+    let metadata = std::fs::metadata(&cache_path).ok()?;
+    let modified = metadata.modified().ok()?;
+    let age = SystemTime::now().duration_since(modified).unwrap_or(Duration::MAX);
+    if age >= VALIDATION_CACHE_TTL {
+        return None;
+    }
+
+    let content = std::fs::read_to_string(&cache_path).ok()?;
+
+    // Cache format: one line per binary, "name:critical|optional:ok|missing"
+    let mut critical = Vec::new();
+    let mut optional = Vec::new();
+
+    for line in content.lines() {
+        let parts: Vec<&str> = line.split(':').collect();
+        if parts.len() != 3 {
+            continue;
+        }
+        let check = BinaryCheck {
+            name: parts[0].to_string(),
+            present: parts[2] == "ok",
+            functional: parts[2] == "ok",
+        };
+        match parts[1] {
+            "critical" => critical.push(check),
+            "optional" => optional.push(check),
+            _ => {}
+        }
+    }
+
+    if critical.is_empty() {
+        return None;
+    }
+
+    Some(ImageValidation {
+        image: image.clone(),
+        critical,
+        optional,
+    })
+}
+
 /// Get the cache file path for a validated image ID.
-fn validation_cache_path(image_id: &str) -> Option<PathBuf> {
+pub fn validation_cache_path(image_id: &str) -> Option<PathBuf> {
     let config_dir = dirs::home_dir()?;
     let hash = hash_string(image_id);
     Some(

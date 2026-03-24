@@ -430,6 +430,15 @@ pub fn sync_result(result: &crate::types::SyncResult) {
             RepoSyncResult::Skipped { repo_name, reason } => {
                 println!("  {} {} — {}", "·".dimmed(), repo_name, reason.dimmed());
             }
+            RepoSyncResult::Conflicted { repo_name, files } => {
+                println!("  {} {} — merge conflict ({} file(s))", "✗".red(), repo_name, files.len());
+                for f in files.iter().take(5) {
+                    println!("      {}", f.dimmed());
+                }
+                if files.len() > 5 {
+                    println!("      {} more...", files.len() - 5);
+                }
+            }
             RepoSyncResult::Failed { repo_name, error } => {
                 println!("  {} {} — {}", "✗".red(), repo_name, error);
             }
@@ -441,10 +450,15 @@ pub fn sync_result(result: &crate::types::SyncResult) {
 
     let s = result.succeeded();
     let f = result.failed();
+    let c = result.conflicted();
     let k = result.skipped();
 
-    if f > 0 {
-        println!("{} {} succeeded, {} failed, {} skipped", "⚠".yellow(), s, f, k);
+    if result.is_partial() {
+        println!("{} Partial sync: {} succeeded, {} failed, {} conflict(s), {} skipped",
+            "⚠".yellow(), s, f, c, k);
+    } else if f > 0 || c > 0 {
+        println!("{} {} succeeded, {} failed, {} conflict(s), {} skipped",
+            "⚠".yellow(), s, f, c, k);
     } else if s > 0 {
         println!("{} {} succeeded, {} skipped", "✓".green(), s, k);
     } else {

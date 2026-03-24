@@ -684,7 +684,7 @@ echo "BUNDLE_OK"
         ).await;
 
         if exit_code != 0 {
-            return Err(ContainerError::ExtractionFailed {
+            return Err(ContainerError::BundleFailed {
                 repo: repo_name.to_string(),
                 reason: format!("git bundle exited {}: {}", exit_code, log_output.lines().last().unwrap_or("unknown")),
             });
@@ -692,7 +692,7 @@ echo "BUNDLE_OK"
 
         // Verify the bundle file exists
         if !bundle_host_path.exists() {
-            return Err(ContainerError::ExtractionFailed {
+            return Err(ContainerError::BundleFailed {
                 repo: repo_name.to_string(),
                 reason: format!("bundle file not created. Container output:\n{}", log_output),
             });
@@ -718,7 +718,7 @@ echo "BUNDLE_OK"
 
             if !fetch_all.status.success() {
                 let stderr = String::from_utf8_lossy(&fetch_all.stderr);
-                return Err(ContainerError::ExtractionFailed {
+                return Err(ContainerError::FetchFailed {
                     repo: repo_name.to_string(),
                     reason: format!("git fetch from bundle failed: {}", stderr.lines().last().unwrap_or("unknown")),
                 });
@@ -727,7 +727,7 @@ echo "BUNDLE_OK"
 
         // Resolve FETCH_HEAD (set by git fetch)
         let fetch_head = repo.find_reference("FETCH_HEAD")
-            .map_err(|_| ContainerError::ExtractionFailed {
+            .map_err(|_| ContainerError::BranchCreateFailed {
                 repo: repo_name.to_string(),
                 reason: "FETCH_HEAD not set after bundle fetch".to_string(),
             })?;
@@ -1124,7 +1124,7 @@ echo "Cloned $(git rev-parse --short HEAD) on $(git symbolic-ref --short HEAD 2>
         ).await;
 
         if exit_code != 0 {
-            return Err(ContainerError::ExtractionFailed {
+            return Err(ContainerError::FetchFailed {
                 repo: repo_name.to_string(),
                 reason: format!(
                     "clone exited with code {}: {}",
@@ -1282,7 +1282,7 @@ git remote remove _cc_upstream 2>/dev/null
         ).await;
 
         if exit_code != 0 {
-            return Err(ContainerError::ExtractionFailed {
+            return Err(ContainerError::InjectionFailed {
                 repo: repo_name.to_string(),
                 reason: format!(
                     "inject (git fetch+merge) exited with code {}: {}",
@@ -1466,6 +1466,14 @@ git remote remove _cc_upstream 2>/dev/null
 
         // Step 2: merge session branch → target branch (squash by default)
         let merge = self.merge(host_path, session_branch, target_branch, true)?;
+
+        // If the merge resulted in conflicts, return a Conflicted result
+        if let MergeOutcome::Conflict { files } = &merge {
+            return Ok(RepoSyncResult::Conflicted {
+                repo_name: repo_name.to_string(),
+                files: files.clone(),
+            });
+        }
 
         Ok(RepoSyncResult::Pulled {
             repo_name: repo_name.to_string(),

@@ -42,6 +42,8 @@ tar = "0.4"
 crossterm = "0.28"
 # Unix libc for uid/gid/isatty
 libc = "0.2"
+# Base64 encoding (pure Rust, no shell dependency)
+base64 = "0.22"
 # Signal handling
 signal-hook = "0.3"
 signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }

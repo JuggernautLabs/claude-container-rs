@@ -492,9 +492,8 @@ impl SessionManager {
             Some(bollard::container::RemoveContainerOptions { force: true, ..Default::default() }),
         ).await;
 
-        // Write via shell — pass yaml as env var to avoid quoting issues
-        let escaped = yaml.replace('\'', "'\\''");
-        let script = format!("echo '{}' > /session/.claude-projects.yml", escaped);
+        // Write via base64-encoded pipe — safe for any YAML content
+        let script = crate::shell_safety::write_config_script(&yaml);
 
         let cfg = bollard::container::Config {
             image: Some("alpine:latest".to_string()),
@@ -586,7 +585,6 @@ impl SessionManager {
                 repos.push(RepoConfig {
                     name,
                     host_path: path,
-                    extract_enabled: true,
                     branch,
                 });
             }
@@ -657,7 +655,6 @@ impl SessionManager {
             .map(|(proj_name, proj_cfg)| RepoConfig {
                 name: proj_name.clone(),
                 host_path: proj_cfg.path.clone(),
-                extract_enabled: proj_cfg.extract,
                 branch: None,
             })
             .collect();

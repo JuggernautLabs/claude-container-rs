@@ -13,8 +13,6 @@ pub struct SessionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectConfig {
     pub path: PathBuf,
-    #[serde(default = "default_true")]
-    pub extract: bool,
     #[serde(default)]
     pub main: bool,
     #[serde(default)]
@@ -43,8 +41,6 @@ impl std::fmt::Display for RepoRole {
         }
     }
 }
-
-fn default_true() -> bool { true }
 
 impl SessionConfig {
     /// Return only project repos (filter out dependencies)

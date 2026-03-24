@@ -1,7 +1,7 @@
 //! Error types — every failure mode is a typed variant
 
 use std::path::PathBuf;
-use super::{SessionName, ContainerName, ImageRef, VolumeName};
+use super::{ContainerName, ImageRef, SessionName, VolumeName};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -14,7 +14,10 @@ pub enum ContainerError {
     ImageNotFound(ImageRef),
 
     #[error("Image invalid: {image} — missing: {missing:?}")]
-    ImageInvalid { image: ImageRef, missing: Vec<String> },
+    ImageInvalid {
+        image: ImageRef,
+        missing: Vec<String>,
+    },
 
     #[error("Container not found: {0}")]
     ContainerNotFound(ContainerName),
@@ -23,7 +26,10 @@ pub enum ContainerError {
     ContainerRunning(ContainerName),
 
     #[error("Container stale: {name} — {reasons:?}")]
-    ContainerStale { name: ContainerName, reasons: Vec<String> },
+    ContainerStale {
+        name: ContainerName,
+        reasons: Vec<String>,
+    },
 
     // --- Session errors ---
     #[error("Session not found: {0}")]
@@ -52,8 +58,17 @@ pub enum ContainerError {
     #[error("Merge conflict in {repo}: {files:?}")]
     MergeConflict { repo: String, files: Vec<String> },
 
-    #[error("Extraction failed for {repo}: {reason}")]
-    ExtractionFailed { repo: String, reason: String },
+    #[error("Bundle creation failed for {repo}: {reason}")]
+    BundleFailed { repo: String, reason: String },
+
+    #[error("Fetch failed for {repo}: {reason}")]
+    FetchFailed { repo: String, reason: String },
+
+    #[error("Branch creation failed for {repo}: {reason}")]
+    BranchCreateFailed { repo: String, reason: String },
+
+    #[error("Injection failed for {repo}: {reason}")]
+    InjectionFailed { repo: String, reason: String },
 
     // --- Config errors ---
     #[error("Config not found: {0}")]

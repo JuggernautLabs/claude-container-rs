@@ -5,6 +5,7 @@ mod sync;
 mod container;
 mod render;
 pub mod scripts;
+mod shell_safety;
 
 use clap::{Parser, Subcommand};
 use types::*;
@@ -145,6 +146,9 @@ enum Commands {
     #[command(name = "validate-image")]
     ValidateImage {
         image: String,
+        /// Force revalidation, ignoring any cached result
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -214,9 +218,9 @@ enum SessionAction {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Restore terminal sanity in case a previous session leaked raw mode.
-    // crossterm::disable_raw_mode() only works if crossterm enabled it (same process).
-    // For cross-process leaks, we need to reset termios directly.
-    reset_terminal();
+    // Uses the consolidated restore_terminal() which handles crossterm,
+    // cursor visibility, and termios flags in one call.
+    container::restore_terminal();
 
     let cli = Cli::parse();
     let auto_yes = cli.yes;
@@ -225,8 +229,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::List => {
             cmd_list().await?;
         }
-        Commands::ValidateImage { image } => {
-            cmd_validate_image(&image).await?;
+        Commands::ValidateImage { image, force } => {
+            cmd_validate_image(&image, force).await?;
         }
         Commands::Run { session, prompt, dockerfile } => {
             let name = SessionName::new(&session);
@@ -234,7 +238,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Start { session, attach, logs, dockerfile, discover_repos, r#continue, docker, as_root, from_branch, prompt } => {
             let name = SessionName::new(&session);
-            cmd_start(&name, attach, logs, auto_yes, dockerfile, discover_repos, r#continue, docker, as_root, from_branch).await?;
+            cmd_start(&name, attach, logs, auto_yes, dockerfile, discover_repos, r#continue, docker, as_root, from_branch, prompt).await?;
         }
         Commands::Session { session, filter, action } => {
             let name = SessionName::new(&session);
@@ -251,10 +255,10 @@ async fn main() -> anyhow::Result<()> {
                     cmd_session_exec(&name, root, &command).await?;
                 }
                 SessionAction::Start { attach, logs } => {
-                    cmd_start(&name, attach, logs, auto_yes, None, None, false, false, false, None).await?;
+                    cmd_start(&name, attach, logs, auto_yes, None, None, false, false, false, None, None).await?;
                 }
                 SessionAction::Stop => {
-                    cmd_session_stop(&name).await?;
+                    cmd_session_stop(&name, auto_yes).await?;
                 }
                 SessionAction::Rebuild => {
                     cmd_session_rebuild(&name, auto_yes).await?;
@@ -287,10 +291,11 @@ async fn main() -> anyhow::Result<()> {
             let name = SessionName::new(&session);
             cmd_sync_preview(&name, &branch.unwrap_or("main".into()), filter.as_deref()).await?;
         }
-        Commands::Pull { session, branch, filter, all, dry_run, .. } => {
+        Commands::Pull { session, branch, filter, all, dry_run, squash, .. } => {
             let name = SessionName::new(&session);
+            let use_squash = squash.unwrap_or(true);
             if let Some(branch) = branch {
-                cmd_pull(&name, &branch, filter.as_deref(), all, dry_run, auto_yes).await?;
+                cmd_pull(&name, &branch, filter.as_deref(), all, dry_run, auto_yes, use_squash).await?;
             } else {
                 cmd_extract(&name, filter.as_deref(), dry_run, auto_yes).await?;
             }
@@ -378,9 +383,22 @@ async fn cmd_list() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_validate_image(image: &str) -> anyhow::Result<()> {
+async fn cmd_validate_image(image: &str, force: bool) -> anyhow::Result<()> {
     let lc = lifecycle::Lifecycle::new()?;
     let image_ref = ImageRef::new(image);
+
+    if force {
+        // Evict cached result so validate_image() re-runs from scratch
+        let inspect = lc.docker_client()
+            .inspect_image(image_ref.as_str())
+            .await
+            .map_err(|_| anyhow::anyhow!("Image not found: {}", image))?;
+        let image_id = inspect.id.unwrap_or_default();
+        if let Some(cache_path) = lifecycle::validation_cache_path(&image_id) {
+            let _ = std::fs::remove_file(cache_path);
+        }
+    }
+
     let validation = lc.validate_image(&image_ref).await?;
     render::image_validation(&validation);
     if !validation.is_valid() {
@@ -396,11 +414,16 @@ async fn cmd_start(
     auto_yes: bool,
     dockerfile: Option<PathBuf>,
     discover_repos: Option<PathBuf>,
-    _continue_session: bool,
+    continue_session: bool,
     enable_docker: bool,
     as_root: bool,
     from_branch: Option<String>,
+    initial_prompt: Option<String>,
 ) -> anyhow::Result<()> {
+    let launch_opts = container::LaunchOptions {
+        continue_session,
+        initial_prompt,
+    };
     let lc = lifecycle::Lifecycle::new()?;
     let sm = session::SessionManager::new(lc.docker_client().clone());
 
@@ -432,7 +455,6 @@ async fn cmd_start(
                     vec![types::RepoConfig {
                         name: repo_name,
                         host_path: cwd,
-                        extract_enabled: true,
                         branch,
                     }]
                 } else {
@@ -460,7 +482,6 @@ async fn cmd_start(
             for repo in &repos {
                 projects.insert(repo.name.clone(), types::ProjectConfig {
                     path: repo.host_path.clone(),
-                    extract: repo.extract_enabled,
                     main: false,
                     role: Default::default(),
                 });
@@ -600,7 +621,7 @@ async fn cmd_start(
     eprintln!();
     use std::io::Write;
     std::io::stderr().flush().ok();
-    container::launch(&lc, ready, name, &script_dir).await?;
+    container::launch(&lc, ready, name, &script_dir, &launch_opts).await?;
 
     Ok(())
 }
@@ -783,11 +804,7 @@ async fn cmd_session_exec(name: &SessionName, as_root: bool, command: &[String])
         _ => anyhow::bail!("Container not running. Start it first."),
     }
 
-    let cmd = if command.is_empty() {
-        vec!["bash".to_string()]
-    } else {
-        vec!["bash".to_string(), "-c".to_string(), command.join(" ")]
-    };
+    let cmd = shell_safety::build_exec_cmd(command);
 
     let exec = docker.create_exec(
         container_name.as_str(),
@@ -812,12 +829,16 @@ async fn cmd_session_exec(name: &SessionName, as_root: bool, command: &[String])
     Ok(())
 }
 
-async fn cmd_session_stop(name: &SessionName) -> anyhow::Result<()> {
+async fn cmd_session_stop(name: &SessionName, auto_yes: bool) -> anyhow::Result<()> {
     let lc = lifecycle::Lifecycle::new()?;
     let container_name = name.container_name();
 
     match lc.inspect_container(&container_name).await? {
         types::docker::ContainerState::Running { .. } => {
+            if !confirm(&format!("  Stop container '{}'?", name), auto_yes) {
+                eprintln!("  Aborted.");
+                return Ok(());
+            }
             eprintln!("  Stopping {}...", container_name);
             lc.docker_client().stop_container(
                 container_name.as_str(),
@@ -854,11 +875,8 @@ async fn cmd_session_rebuild(name: &SessionName, auto_yes: bool) -> anyhow::Resu
         _ => {}
     }
 
-    eprintln!("  Removing container {}...", container_name);
-    lc.remove_container(&container_name).await?;
-    eprintln!("  {} Container removed. Volumes preserved.", colored::Colorize::green("✓"));
-
-    // Rebuild image if session has a Dockerfile
+    // Build image FIRST — only remove container after successful build.
+    // This prevents leaving the user with no container if the build fails.
     let sm = session::SessionManager::new(lc.docker_client().clone());
     if let Some(meta) = sm.load_metadata(name) {
         if let Some(ref df) = meta.dockerfile {
@@ -870,12 +888,17 @@ async fn cmd_session_rebuild(name: &SessionName, auto_yes: bool) -> anyhow::Resu
             if df_path.exists() {
                 let image_name = format!("claude-dev-{}", name);
                 let image_ref = ImageRef::new(&image_name);
-                eprintln!("  Rebuilding image {} from {}...", image_name, df_path.display());
+                eprintln!("  Building image {} from {}...", image_name, df_path.display());
                 lc.build_image(&image_ref, &df_path, &df_path.parent().unwrap_or(&PathBuf::from("."))).await?;
-                eprintln!("  {} Image rebuilt.", colored::Colorize::green("✓"));
+                eprintln!("  {} Image built successfully.", colored::Colorize::green("✓"));
             }
         }
     }
+
+    // Image validated (or no Dockerfile) — now safe to remove the old container
+    eprintln!("  Removing container {}...", container_name);
+    lc.remove_container(&container_name).await?;
+    eprintln!("  {} Container removed. Volumes preserved.", colored::Colorize::green("✓"));
 
     eprintln!("  Run `git-sandbox start -s {}` to launch.", name);
     Ok(())
@@ -1363,7 +1386,7 @@ async fn cmd_extract(name: &SessionName, filter: Option<&str>, dry_run: bool, au
     Ok(())
 }
 
-async fn cmd_pull(name: &SessionName, branch: &str, filter: Option<&str>, include_deps: bool, dry_run: bool, auto_yes: bool) -> anyhow::Result<()> {
+async fn cmd_pull(name: &SessionName, branch: &str, filter: Option<&str>, include_deps: bool, dry_run: bool, auto_yes: bool, squash: bool) -> anyhow::Result<()> {
     let (lc, engine, plan, repo_paths) = build_sync_plan(name, branch, filter, include_deps).await?;
 
     // Collect info before consuming plan
@@ -1417,7 +1440,7 @@ async fn cmd_pull(name: &SessionName, branch: &str, filter: Option<&str>, includ
         let session_branch = name.to_string();
         if confirm(&format!("\n  Merge {} repo(s) from session branch into {}?", pending_merge_repos.len(), branch), auto_yes) {
             for (repo_name, host_path) in &pending_merge_repos {
-                match engine.merge(host_path, &session_branch, branch, true) {
+                match engine.merge(host_path, &session_branch, branch, squash) {
                     Ok(outcome) => {
                         eprintln!("  {} {} — {:?}", colored::Colorize::green("✓"), repo_name, outcome);
                     }
@@ -1464,8 +1487,8 @@ async fn cmd_pull(name: &SessionName, branch: &str, filter: Option<&str>, includ
                     match engine.inject(name, &dinfo.repo_name, host_path, branch).await {
                         Ok(()) => {
                             match engine.extract(name, &dinfo.repo_name, host_path, &session_branch).await {
-                                Ok(extract) => {
-                                    match engine.merge(host_path, &session_branch, branch, true) {
+                                Ok(_extract) => {
+                                    match engine.merge(host_path, &session_branch, branch, squash) {
                                         Ok(outcome) => eprintln!("    {} auto-merged ({:?})", colored::Colorize::green("✓"), outcome),
                                         Err(e) => eprintln!("    {} merge failed: {}", colored::Colorize::red("✗"), e),
                                     }
@@ -1551,27 +1574,15 @@ async fn cmd_sync(name: &SessionName, branch: &str, filter: Option<&str>, includ
 }
 
 /// Extract conflict info from sync results for agentic reconciliation.
+/// Uses typed pattern matching on RepoSyncResult::Conflicted — no string inspection.
 fn collect_conflicts(
     result: &types::SyncResult,
     repo_paths: &std::collections::BTreeMap<String, std::path::PathBuf>,
 ) -> Vec<(String, std::path::PathBuf, Vec<String>)> {
     result.results.iter().filter_map(|r| {
-        if let types::action::RepoSyncResult::Failed { repo_name, error } = r {
-            // Check if the error mentions conflicts
-            if error.contains("Conflict") || error.contains("conflict") {
-                let host_path = repo_paths.get(repo_name)?.clone();
-                // Parse conflict files from error message if possible
-                let files = if let Some(start) = error.find('[') {
-                    if let Some(end) = error.find(']') {
-                        error[start+1..end].split(", ")
-                            .map(|s| s.trim().trim_matches('"').to_string())
-                            .collect()
-                    } else { vec![] }
-                } else { vec![] };
-                Some((repo_name.clone(), host_path, files))
-            } else {
-                None
-            }
+        if let types::action::RepoSyncResult::Conflicted { repo_name, files } = r {
+            let host_path = repo_paths.get(repo_name)?.clone();
+            Some((repo_name.clone(), host_path, files.clone()))
         } else {
             None
         }
@@ -1711,11 +1722,6 @@ async fn build_sync_plan(
     Ok((lc, engine, plan, repo_paths))
 }
 
-/// Reset terminal to cooked mode, handling cross-process raw mode leaks.
-///
-/// Unconditionally ensures OPOST (output processing) is on so that \n → \r\n.
-/// Without OPOST, eprintln! produces staircase output.
-/// Also restores ICANON/ECHO if missing (full raw mode leak).
 /// Prompt for confirmation. Returns true if confirmed.
 /// With --yes, always returns true without prompting.
 fn confirm(prompt: &str, auto_yes: bool) -> bool {
@@ -1726,46 +1732,4 @@ fn confirm(prompt: &str, auto_yes: bool) -> bool {
     let mut answer = String::new();
     std::io::stdin().read_line(&mut answer).ok();
     !answer.trim().to_lowercase().starts_with('n')
-}
-
-fn reset_terminal() {
-    // Restore cursor visibility (Claude Code hides it)
-    print!("\x1b[?25h");
-    let _ = std::io::Write::flush(&mut std::io::stdout());
-
-    #[cfg(unix)]
-    {
-        unsafe {
-            let fd = libc::STDERR_FILENO;
-            let mut termios: libc::termios = std::mem::zeroed();
-            if libc::tcgetattr(fd, &mut termios) != 0 {
-                return; // not a terminal
-            }
-
-            let mut needs_fix = false;
-
-            // OPOST off = staircase (\n without \r)
-            if termios.c_oflag & libc::OPOST == 0 {
-                termios.c_oflag |= libc::OPOST;
-                needs_fix = true;
-            }
-
-            // ICANON off = raw input mode
-            if termios.c_lflag & libc::ICANON == 0 {
-                termios.c_lflag |= libc::ICANON | libc::ISIG | libc::IEXTEN;
-                termios.c_iflag |= libc::ICRNL | libc::IXON;
-                needs_fix = true;
-            }
-
-            // ECHO off = no local echo
-            if termios.c_lflag & libc::ECHO == 0 {
-                termios.c_lflag |= libc::ECHO;
-                needs_fix = true;
-            }
-
-            if needs_fix {
-                libc::tcsetattr(fd, libc::TCSANOW, &termios);
-            }
-        }
-    }
 }

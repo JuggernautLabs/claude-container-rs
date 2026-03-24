@@ -659,8 +659,8 @@ mod config_tests {
     fn project(path: &str, main: bool) -> ProjectConfig {
         ProjectConfig {
             path: PathBuf::from(path),
-            extract: true,
             main,
+            role: Default::default(),
         }
     }
 

@@ -128,6 +128,34 @@ pub async fn plan_target(
 }
 
 // ============================================================================
+// Launch options — flags that affect container creation
+// ============================================================================
+
+/// Options that control container creation, wired from CLI flags.
+#[derive(Debug, Clone, Default)]
+pub struct LaunchOptions {
+    /// --continue: resume previous Claude conversation
+    pub continue_session: bool,
+    /// --prompt: initial prompt for Claude (interactive mode)
+    pub initial_prompt: Option<String>,
+}
+
+impl LaunchOptions {
+    /// Build the environment variables contributed by these options.
+    pub fn env_vars(&self) -> Vec<String> {
+        let mut env = Vec::new();
+        if self.continue_session {
+            env.push("CONTINUE_SESSION=1".to_string());
+        }
+        if let Some(ref prompt) = self.initial_prompt {
+            let encoded = base64_encode(prompt);
+            env.push(format!("CLAUDE_INITIAL_PROMPT={}", encoded));
+        }
+        env
+    }
+}
+
+// ============================================================================
 // Container creation arguments builder
 // ============================================================================
 
@@ -136,6 +164,7 @@ fn build_create_args(
     ready: &LaunchReady,
     session_name: &SessionName,
     script_dir: &Path,
+    opts: &LaunchOptions,
 ) -> ContainerCreateArgs {
     let mut args = ContainerCreateArgs {
         tty: true,
@@ -159,6 +188,9 @@ fn build_create_args(
     args.env.push(format!("TERM={}", std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".into())));
     args.env.push("PLATFORM=linux".to_string());
     args.env.push("RUN_AS_ROOTISH=1".to_string());
+
+    // Launch options: --continue, --prompt
+    args.env.extend(opts.env_vars());
 
     // Token: always use env var — file mounts to /run/secrets/ fail on Colima/Docker Desktop
     // because the directory doesn't exist in the image and Docker creates it as a dir.
@@ -242,6 +274,57 @@ fn build_create_args(
 // Terminal management
 // ============================================================================
 
+/// Consolidated terminal restore: disable raw mode, show cursor, restore
+/// OPOST/ICANON/ECHO. Safe to call multiple times (idempotent).
+///
+/// This is the ONE function that all exit paths must call to ensure the
+/// terminal is left in a usable state. Handles:
+/// - crossterm raw mode disable (no-op if not enabled)
+/// - Cursor visibility restore (\x1b[?25h)
+/// - termios OPOST/ICANON/ECHO/ISIG/IEXTEN/ICRNL/IXON restore
+pub fn restore_terminal() {
+    // 1. Disable crossterm raw mode (safe even if never enabled)
+    let _ = terminal::disable_raw_mode();
+
+    // 2. Show cursor
+    print!("\x1b[?25h");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+
+    // 3. Restore termios flags
+    #[cfg(unix)]
+    {
+        unsafe {
+            let fd = libc::STDERR_FILENO;
+            let mut termios: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(fd, &mut termios) != 0 {
+                return; // not a terminal
+            }
+
+            let mut needs_fix = false;
+
+            if termios.c_oflag & libc::OPOST == 0 {
+                termios.c_oflag |= libc::OPOST;
+                needs_fix = true;
+            }
+
+            if termios.c_lflag & libc::ICANON == 0 {
+                termios.c_lflag |= libc::ICANON | libc::ISIG | libc::IEXTEN;
+                termios.c_iflag |= libc::ICRNL | libc::IXON;
+                needs_fix = true;
+            }
+
+            if termios.c_lflag & libc::ECHO == 0 {
+                termios.c_lflag |= libc::ECHO;
+                needs_fix = true;
+            }
+
+            if needs_fix {
+                libc::tcsetattr(fd, libc::TCSANOW, &termios);
+            }
+        }
+    }
+}
+
 /// RAII guard that restores terminal state on drop.
 struct RawModeGuard {
     was_enabled: bool,
@@ -262,7 +345,7 @@ impl RawModeGuard {
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
         if self.was_enabled {
-            let _ = terminal::disable_raw_mode();
+            restore_terminal();
         }
     }
 }
@@ -315,7 +398,7 @@ pub async fn launch_reconciliation(
     // Remove existing container — reconciliation always gets a fresh one
     let _ = lc.remove_container(&container_name).await;
 
-    let mut args = build_create_args(&ready, session_name, script_dir);
+    let mut args = build_create_args(&ready, session_name, script_dir, &LaunchOptions::default());
 
     // Set agent task
     args.env.push("AGENT_TASK=resolve-conflicts".to_string());
@@ -473,20 +556,25 @@ async fn attach_container(
     // Detect Ctrl-C (0x03) in raw mode and exit
     let ctrlc_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
     let ctrlc_count_clone = ctrlc_count.clone();
+    let eof_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let eof_flag_clone = eof_flag.clone();
     let stdin_handle = tokio::spawn(async move {
         let mut stdin = tokio::io::stdin();
         let mut buf = [0u8; 4096];
         loop {
             match stdin.read(&mut buf).await {
-                Ok(0) => break,      // EOF
+                Ok(0) => {
+                    // EOF / broken pipe — distinct from Ctrl-C
+                    eof_flag_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                    break;
+                }
                 Ok(n) => {
                     // Check for Ctrl-C (0x03) — in raw mode it comes as a byte, not SIGINT
                     if buf[..n].contains(&0x03) {
                         let count = ctrlc_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         if count >= 1 {
                             // Second Ctrl-C: force exit
-                            let _ = crossterm::terminal::disable_raw_mode();
-                            eprint!("\x1b[?25h"); // show cursor
+                            restore_terminal();
                             eprintln!("\r\n→ Detached.");
                             std::process::exit(0);
                         }
@@ -499,7 +587,10 @@ async fn attach_container(
                         break;
                     }
                 }
-                Err(_) => break,
+                Err(_) => {
+                    eof_flag_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                    break;
+                }
             }
         }
     });
@@ -543,42 +634,60 @@ async fn attach_container(
     let ctrlc_flag_clone = ctrlc_flag.clone();
     let _ = ctrlc::set_handler(move || {
         ctrlc_flag_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-        // Restore terminal immediately (raw mode guard is in another scope)
-        let _ = crossterm::terminal::disable_raw_mode();
-        eprint!("\x1b[?25h"); // show cursor
-        eprintln!("\n\r→ Detached from container.");
+        // Restore terminal fully via consolidated function
+        restore_terminal();
+        eprintln!("\r\n→ Detached from container.");
         std::process::exit(0);
     });
 
-    // Forward container output -> host stdout (main loop, blocks until container exits)
-    let mut stdout = tokio::io::stdout();
-    while let Some(result) = output.next().await {
-        if ctrlc_flag.load(std::sync::atomic::Ordering::SeqCst) {
-            break;
-        }
-        match result {
-            Ok(log) => {
-                let bytes = log.into_bytes();
-                if stdout.write_all(&bytes).await.is_err() {
+    // Forward container output -> host stdout (main loop, blocks until container exits).
+    // Wrapped in a spawned task so panics are caught (JoinHandle captures panics).
+    let ctrlc_flag_for_loop = ctrlc_flag.clone();
+    let loop_result = {
+        use std::panic::AssertUnwindSafe;
+        let handle = tokio::spawn(AssertUnwindSafe(async move {
+            let mut stdout = tokio::io::stdout();
+            while let Some(result) = output.next().await {
+                if ctrlc_flag_for_loop.load(std::sync::atomic::Ordering::SeqCst) {
                     break;
                 }
-                if stdout.flush().await.is_err() {
-                    break;
+                match result {
+                    Ok(log) => {
+                        let bytes = log.into_bytes();
+                        if stdout.write_all(&bytes).await.is_err() {
+                            break;
+                        }
+                        if stdout.flush().await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
                 }
             }
-            Err(_) => break,
-        }
-    }
+        }));
+        handle.await
+    };
 
     // Clean up background tasks
     stdin_handle.abort();
     resize_handle.abort();
 
-    // _raw_guard drops here, restoring terminal
+    // _raw_guard drops here, but we also call restore_terminal() explicitly
+    // to cover the panic case (Drop may not run if panic=abort).
+    restore_terminal();
 
-    // Restore cursor visibility — Claude Code hides it for its TUI
-    print!("\x1b[?25h");
-    let _ = std::io::Write::flush(&mut std::io::stdout());
+    // Print appropriate exit message based on how we exited
+    if eof_flag.load(std::sync::atomic::Ordering::SeqCst) {
+        eprintln!("\r\n→ Connection lost.");
+    }
+
+    // If the output loop panicked, report it but don't re-panic
+    // (terminal is already restored above)
+    if let Err(join_err) = loop_result {
+        if join_err.is_panic() {
+            eprintln!("\r\n→ Internal error during attach (panic caught). Terminal restored.");
+        }
+    }
 
     Ok(())
 }
@@ -605,7 +714,7 @@ pub async fn run_headless(
     let container_name = session_name.container_name();
 
     // Build args, then inject run-mode overrides
-    let mut args = build_create_args(&ready, session_name, script_dir);
+    let mut args = build_create_args(&ready, session_name, script_dir, &LaunchOptions::default());
 
     // Set AGENT_TASK=run so cc-developer-setup uses -p (print) mode
     args.env.push("AGENT_TASK=run".to_string());
@@ -684,27 +793,9 @@ pub async fn run_headless(
     Ok(output)
 }
 
-/// Base64-encode a string (simple implementation, no external crate needed).
+/// Base64-encode a string using pure Rust (no shell dependency).
 fn base64_encode(input: &str) -> String {
-    use std::process::Command;
-    // Use the system base64 command since we don't have a base64 crate
-    let output = Command::new("base64")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .and_then(|mut child| {
-            use std::io::Write;
-            child.stdin.take().unwrap().write_all(input.as_bytes())?;
-            child.wait_with_output()
-        });
-
-    match output {
-        Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
-        Err(_) => {
-            // Fallback: just pass raw (the entrypoint will handle it)
-            input.to_string()
-        }
-    }
+    crate::shell_safety::base64_encode(input)
 }
 
 // ============================================================================
@@ -721,13 +812,14 @@ pub async fn launch(
     ready: LaunchReady,
     session_name: &SessionName,
     script_dir: &Path,
+    opts: &LaunchOptions,
 ) -> Result<(), ContainerError> {
     let container_name = session_name.container_name();
 
     match &ready.container {
         LaunchTarget::Create => {
             eprintln!("  Creating container {}...", container_name);
-            let args = build_create_args(&ready, session_name, script_dir);
+            let args = build_create_args(&ready, session_name, script_dir, opts);
             lc.create_container(&container_name, &ready.image.image, args).await?;
             lc.start_container(&container_name).await?;
             attach_container(lc, &container_name, false).await?;
@@ -744,7 +836,7 @@ pub async fn launch(
             // Remove the old container
             lc.remove_container(&container_name).await?;
             // Create fresh
-            let args = build_create_args(&ready, session_name, script_dir);
+            let args = build_create_args(&ready, session_name, script_dir, opts);
             lc.create_container(&container_name, &ready.image.image, args).await?;
             lc.start_container(&container_name).await?;
             attach_container(lc, &container_name, false).await?;

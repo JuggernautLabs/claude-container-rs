@@ -187,6 +187,11 @@ pub enum RepoSyncResult {
         repo_name: String,
         reason: String,
     },
+    /// Merge conflict detected — carries the conflicting file paths
+    Conflicted {
+        repo_name: String,
+        files: Vec<String>,
+    },
     /// Failed
     Failed {
         repo_name: String,
@@ -214,8 +219,18 @@ impl SyncResult {
         self.results.iter().filter(|r| matches!(r, RepoSyncResult::Failed { .. })).count()
     }
 
+    pub fn conflicted(&self) -> usize {
+        self.results.iter().filter(|r| matches!(r, RepoSyncResult::Conflicted { .. })).count()
+    }
+
     pub fn skipped(&self) -> usize {
         self.results.iter().filter(|r| matches!(r, RepoSyncResult::Skipped { .. })).count()
+    }
+
+    /// Returns true when some repos succeeded and some failed (partial failure).
+    /// A fully successful or fully failed result is NOT partial.
+    pub fn is_partial(&self) -> bool {
+        self.succeeded() > 0 && self.failed() > 0
     }
 }
 
