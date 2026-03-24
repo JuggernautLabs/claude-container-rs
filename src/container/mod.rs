@@ -189,6 +189,16 @@ fn build_create_args(
     args.env.push("PLATFORM=linux".to_string());
     args.env.push("RUN_AS_ROOTISH=1".to_string());
 
+    // Override tool homes from Docker ENV — redirect to developer-owned volumes.
+    // Docker ENV CARGO_HOME=/usr/local/cargo is baked into the image and can't be
+    // overridden by shell exports in the entrypoint (exec resets env).
+    // Setting them here as container env vars takes precedence over image ENV.
+    args.env.push("CARGO_HOME=/home/developer/.cargo".to_string());
+    args.env.push("CABAL_DIR=/home/developer/.cabal".to_string());
+    args.env.push("STACK_ROOT=/home/developer/.stack".to_string());
+    args.env.push("NPM_CONFIG_CACHE=/home/developer/.npm".to_string());
+    args.env.push("PIP_CACHE_DIR=/home/developer/.cache/pip".to_string());
+
     // Launch options: --continue, --prompt
     args.env.extend(opts.env_vars());
 
