@@ -1396,9 +1396,21 @@ async fn cmd_pull(name: &SessionName, branch: &str, filter: Option<&str>, includ
         .any(|a| matches!(a.decision, types::SyncDecision::Pull { .. } | types::SyncDecision::CloneToHost));
     let has_merge_to_target = plan.action.repo_actions.iter()
         .any(|a| matches!(a.decision, types::SyncDecision::MergeToTarget { .. }));
-    let pending_merge_repos: Vec<(String, std::path::PathBuf)> = plan.action.repo_actions.iter()
+    struct PendingMergeInfo {
+        repo_name: String,
+        host_path: std::path::PathBuf,
+        has_conflict: bool,
+        conflict_files: Vec<String>,
+    }
+    let pending_merge_repos: Vec<PendingMergeInfo> = plan.action.repo_actions.iter()
         .filter(|a| matches!(a.decision, types::SyncDecision::MergeToTarget { .. }))
-        .filter_map(|a| a.host_path.clone().map(|p| (a.repo_name.clone(), p)))
+        .filter_map(|a| {
+            a.host_path.clone().map(|p| {
+                let has_conflict = a.trial_conflicts.as_ref().map_or(false, |f| !f.is_empty());
+                let conflict_files = a.trial_conflicts.clone().unwrap_or_default();
+                PendingMergeInfo { repo_name: a.repo_name.clone(), host_path: p, has_conflict, conflict_files }
+            })
+        })
         .collect();
     struct DivergedInfo {
         repo_name: String,
@@ -1440,20 +1452,42 @@ async fn cmd_pull(name: &SessionName, branch: &str, filter: Option<&str>, includ
     }
 
     // Execute pending merges (session branch → target, no extraction needed)
-    if !pending_merge_repos.is_empty() {
+    // Split into clean merges and known conflicts
+    let (clean_merges, conflict_merges): (Vec<_>, Vec<_>) = pending_merge_repos.iter()
+        .partition(|m| !m.has_conflict);
+
+    if !clean_merges.is_empty() {
         let session_branch = name.to_string();
-        if confirm(&format!("\n  Merge {} repo(s) from session branch into {}?", pending_merge_repos.len(), branch), auto_yes) {
-            for (repo_name, host_path) in &pending_merge_repos {
-                match engine.merge(host_path, &session_branch, branch, squash) {
+        if confirm(&format!("\n  Merge {} repo(s) into {}?", clean_merges.len(), branch), auto_yes) {
+            for m in &clean_merges {
+                match engine.merge(&m.host_path, &session_branch, branch, squash) {
                     Ok(outcome) => {
-                        eprintln!("  {} {} — {}", colored::Colorize::green("✓"), repo_name, outcome);
+                        if matches!(outcome, types::git::MergeOutcome::Conflict { .. }) {
+                            eprintln!("  {} {} — {}", colored::Colorize::red("✗"), m.repo_name, outcome);
+                        } else {
+                            eprintln!("  {} {} — {}", colored::Colorize::green("✓"), m.repo_name, outcome);
+                        }
                     }
                     Err(e) => {
-                        eprintln!("  {} {} — {}", colored::Colorize::red("✗"), repo_name, e);
+                        eprintln!("  {} {} — {}", colored::Colorize::red("✗"), m.repo_name, e);
                     }
                 }
             }
         }
+    }
+
+    if !conflict_merges.is_empty() {
+        eprintln!();
+        for m in &conflict_merges {
+            let file_list = m.conflict_files.iter().take(5).map(|f| f.as_str()).collect::<Vec<_>>().join(", ");
+            eprintln!("  {} {} — will conflict ({})", colored::Colorize::red("✗"), m.repo_name, file_list);
+        }
+
+        // Collect for reconciliation
+        let conflict_repos: Vec<_> = conflict_merges.iter()
+            .map(|m| (m.repo_name.clone(), m.host_path.clone(), m.conflict_files.clone()))
+            .collect();
+        offer_reconciliation(&lc, name, &conflict_repos, branch).await?;
     }
 
     // Handle diverged repos — prompt per repo

@@ -33,11 +33,17 @@ fn display_name(action: &RepoSyncAction) -> String {
 
 /// Render a horizontal rule
 pub fn rule(label: Option<&str>) {
-    let width = 50;
+    let width = 60;
     if let Some(label) = label {
-        let pad = (width - label.len() - 2) / 2;
+        let label_width = label.chars().count();
+        if label_width + 4 >= width {
+            // Label too long — just print it without padding
+            println!("── {} ──", label);
+            return;
+        }
+        let pad = (width - label_width - 2) / 2;
         let left = "─".repeat(pad);
-        let right = "─".repeat(width - pad - label.len() - 2);
+        let right = "─".repeat(width - pad - label_width - 2);
         println!("{} {} {}", left.dimmed(), label, right.dimmed());
     } else {
         println!("{}", "─".repeat(width).dimmed());
@@ -116,8 +122,8 @@ fn render_session_common(
 /// Render a sync plan with a specific direction label.
 pub fn sync_plan_directed(plan: &SessionSyncPlan, direction: &str) {
     let label = match direction {
-        "push" => format!("push: {} ← {}", plan.target_branch, plan.session_name),
-        "status" => format!("status: {} ↔ {}", plan.session_name, plan.target_branch),
+        "push" => format!("push: host → {} (container)", plan.session_name),
+        "status" => format!("{} ↔ {}", plan.session_name, plan.target_branch),
         "sync" => format!("sync: {} ↔ {}", plan.session_name, plan.target_branch),
         _ => format!("pull: {} → {}", plan.session_name, plan.target_branch),
     };
@@ -157,7 +163,10 @@ fn sync_plan_inner(plan: &SessionSyncPlan, label: &str) {
     // Summary line
     let mut summary_parts = Vec::new();
     if !ready.is_empty() { summary_parts.push(format!("{} ready", ready.len())); }
-    if !pending_merge.is_empty() { summary_parts.push(format!("{} pending merge", pending_merge.len())); }
+    let merge_conflicts: Vec<_> = pending_merge.iter().filter(|a| a.trial_conflicts.as_ref().map_or(false, |f| !f.is_empty())).collect();
+    let merge_clean: Vec<_> = pending_merge.iter().filter(|a| !a.trial_conflicts.as_ref().map_or(false, |f| !f.is_empty())).collect();
+    if !merge_clean.is_empty() { summary_parts.push(format!("{} pending merge", merge_clean.len())); }
+    if !merge_conflicts.is_empty() { summary_parts.push(format!("{} conflict(s)", merge_conflicts.len())); }
     if !diverged.is_empty() { summary_parts.push(format!("{} diverged", diverged.len())); }
     if !skipped.is_empty() { summary_parts.push(format!("{} skipped", skipped.len())); }
     if !blocked.is_empty() { summary_parts.push(format!("{} blocked", blocked.len())); }
@@ -192,8 +201,16 @@ fn sync_plan_inner(plan: &SessionSyncPlan, label: &str) {
                 SyncDecision::MergeToTarget { session_ahead, .. } => *session_ahead,
                 _ => 0,
             };
-            println!("  {} {} — session branch {} commit(s) ahead of {}",
-                "→".blue(), name, ahead, plan.target_branch);
+            let has_conflict = action.trial_conflicts.as_ref().map_or(false, |f| !f.is_empty());
+            if has_conflict {
+                let files = action.trial_conflicts.as_ref().unwrap();
+                let file_list = files.iter().take(3).map(|f| f.as_str()).collect::<Vec<_>>().join(", ");
+                println!("  {} {} — {} commit(s) ahead, will conflict ({})",
+                    "✗".red(), name, ahead, file_list);
+            } else {
+                println!("  {} {} — {} commit(s) ahead of {}",
+                    "→".blue(), name, ahead, plan.target_branch);
+            }
             render_diffstat(&action.session_to_target_diff);
         }
     }

@@ -297,6 +297,15 @@ impl SyncEngine {
                         _ => None,
                     }
                 }
+                SyncDecision::MergeToTarget { .. } => {
+                    // ours = target branch HEAD, theirs = session branch HEAD (both on host)
+                    match (pair.target_head.as_ref(), pair.host.head()) {
+                        (Some(target), Some(session)) => {
+                            self.trial_merge(&host_path, target, session)
+                        }
+                        _ => None,
+                    }
+                }
                 _ => None,
             };
 
