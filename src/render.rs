@@ -126,17 +126,6 @@ pub fn sync_plan(plan: &SessionSyncPlan) {
     let mut unchanged = 0u32;
 
     for action in &plan.repo_actions {
-        // Check if session branch has unmerged work even if container hasn't changed
-        if action.session_ahead_of_target > 0 {
-            match &action.decision {
-                SyncDecision::Skip { .. } => {
-                    pending_merge.push(action);
-                    continue;
-                }
-                _ => {} // if there's also new container work, fall through to normal classification
-            }
-        }
-
         match &action.decision {
             SyncDecision::Skip { .. } => unchanged += 1,
             SyncDecision::Pull { .. } | SyncDecision::CloneToHost => {
@@ -147,6 +136,9 @@ pub fn sync_plan(plan: &SessionSyncPlan) {
             }
             SyncDecision::Reconcile { .. } => {
                 diverged.push(action);
+            }
+            SyncDecision::MergeToTarget { .. } => {
+                pending_merge.push(action);
             }
             SyncDecision::Blocked { .. } => blocked.push(action),
         }
@@ -186,8 +178,12 @@ pub fn sync_plan(plan: &SessionSyncPlan) {
         if !ready.is_empty() { println!(); }
         for action in &pending_merge {
             let name = display_name(action);
+            let ahead = match &action.decision {
+                SyncDecision::MergeToTarget { session_ahead, .. } => *session_ahead,
+                _ => 0,
+            };
             println!("  {} {} — session branch {} commit(s) ahead of {}",
-                "→".blue(), name, action.session_ahead_of_target, plan.target_branch);
+                "→".blue(), name, ahead, plan.target_branch);
             render_diffstat(&action.session_to_target_diff);
         }
     }

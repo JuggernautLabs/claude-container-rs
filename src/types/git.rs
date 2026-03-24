@@ -73,13 +73,21 @@ impl GitSide {
 
 /// A repo viewed from both sides simultaneously.
 /// Sync decisions are made by matching on this pair.
+///
+/// The "triple" model: container HEAD, session branch HEAD (host), target branch HEAD (host).
+/// `host` is the session branch state. `target_head` and `session_to_target` capture
+/// the relationship between session branch and target branch (e.g., main).
 #[derive(Debug, Clone)]
 pub struct RepoPair {
     pub name: String,
     pub container: GitSide,
     pub host: GitSide,
-    /// Additional context when both sides have commits
+    /// Additional context when both sides have commits (container vs session)
     pub relation: Option<PairRelation>,
+    /// Target branch HEAD on the host (e.g., main). None if no target branch specified.
+    pub target_head: Option<CommitHash>,
+    /// Session branch → target branch relationship. None if no target or no session branch.
+    pub session_to_target: Option<SessionTargetRelation>,
 }
 
 /// When both sides have commits, how do they relate?
@@ -89,6 +97,18 @@ pub struct PairRelation {
     pub content: ContentComparison,
     pub squash: SquashState,
     pub target_ahead: TargetAheadKind,
+}
+
+/// Relationship between session branch and target branch on the host.
+/// This is the third leg of the triple: how far ahead/behind/diverged
+/// is the session branch relative to the merge target.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionTargetRelation {
+    /// How session and target relate in terms of git ancestry.
+    /// Uses the same Ancestry enum: "container" means session, "host" means target.
+    pub ancestry: Ancestry,
+    /// Tree content comparison between session and target.
+    pub content: ContentComparison,
 }
 
 // ============================================================================
@@ -158,6 +178,12 @@ pub enum SyncDecision {
     CloneToHost,
     /// Host has it, container doesn't — push in
     PushToContainer,
+    /// Session branch is ahead of target — merge session → target (no extraction needed)
+    MergeToTarget {
+        session_ahead: u32,
+        /// The session-to-target relation for display/diff purposes
+        session_target: SessionTargetRelation,
+    },
     /// Can't sync — blocked by something
     Blocked { reason: BlockReason },
 }
@@ -217,9 +243,9 @@ impl RepoPair {
 
     /// When both sides are clean, use the relation to decide.
     fn decide_clean_pair(&self, c_head: &CommitHash, h_head: &CommitHash) -> SyncDecision {
-        // Same commit — trivially identical
+        // Same commit — trivially identical (but check triple below)
         if c_head == h_head {
-            return SyncDecision::Skip { reason: SkipReason::Identical };
+            return self.maybe_merge_to_target(SyncDecision::Skip { reason: SkipReason::Identical });
         }
 
         // Need the relation to decide
@@ -230,11 +256,11 @@ impl RepoPair {
 
         // Content identical despite different history — squash artifact
         if rel.content == ContentComparison::Identical {
-            return SyncDecision::Skip { reason: SkipReason::SquashIdentical };
+            return self.maybe_merge_to_target(SyncDecision::Skip { reason: SkipReason::SquashIdentical });
         }
 
         match &rel.ancestry {
-            Ancestry::Same => SyncDecision::Skip { reason: SkipReason::Identical },
+            Ancestry::Same => self.maybe_merge_to_target(SyncDecision::Skip { reason: SkipReason::Identical }),
 
             Ancestry::ContainerAhead { container_ahead } =>
                 SyncDecision::Pull { commits: *container_ahead },
@@ -245,7 +271,7 @@ impl RepoPair {
                     TargetAheadKind::AllSquashArtifacts => {
                         // All "ahead" commits are our own squash-merges
                         if rel.content == ContentComparison::Identical {
-                            SyncDecision::Skip { reason: SkipReason::SquashIdentical }
+                            self.maybe_merge_to_target(SyncDecision::Skip { reason: SkipReason::SquashIdentical })
                         } else {
                             SyncDecision::Push { commits: *host_ahead }
                         }
@@ -253,7 +279,7 @@ impl RepoPair {
                     TargetAheadKind::HasExternalWork { .. } =>
                         SyncDecision::Push { commits: *host_ahead },
                     TargetAheadKind::NotAhead =>
-                        SyncDecision::Skip { reason: SkipReason::Identical },
+                        self.maybe_merge_to_target(SyncDecision::Skip { reason: SkipReason::Identical }),
                 }
             }
 
@@ -267,6 +293,40 @@ impl RepoPair {
                 // Container commit not known on host — must be new work
                 SyncDecision::Pull { commits: 1 },
         }
+    }
+
+    /// If the container-vs-session decision is Skip, check whether session is
+    /// ahead of the target branch. If so, upgrade to MergeToTarget.
+    fn maybe_merge_to_target(&self, skip_decision: SyncDecision) -> SyncDecision {
+        if !matches!(skip_decision, SyncDecision::Skip { .. }) {
+            return skip_decision;
+        }
+
+        if let Some(ref st_rel) = self.session_to_target {
+            match &st_rel.ancestry {
+                // Session is ahead of target — needs merge
+                Ancestry::ContainerAhead { container_ahead } if *container_ahead > 0 => {
+                    return SyncDecision::MergeToTarget {
+                        session_ahead: *container_ahead,
+                        session_target: st_rel.clone(),
+                    };
+                }
+                // Session and target diverged — still a merge-to-target situation
+                Ancestry::Diverged { .. } => {
+                    let session_ahead = match &st_rel.ancestry {
+                        Ancestry::Diverged { container_ahead, .. } => *container_ahead,
+                        _ => 0,
+                    };
+                    return SyncDecision::MergeToTarget {
+                        session_ahead,
+                        session_target: st_rel.clone(),
+                    };
+                }
+                _ => {}
+            }
+        }
+
+        skip_decision
     }
 }
 

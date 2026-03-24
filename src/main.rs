@@ -141,13 +141,7 @@ enum Commands {
     },
     /// List all sessions
     #[command(name = "ls")]
-    List {
-        /// Only show sessions that have at least one volume existing
-        #[arg(long)]
-        active: bool,
-    },
-    /// Remove orphaned throwaway containers
-    Gc,
+    List,
     /// Validate a Docker image meets the container protocol
     #[command(name = "validate-image")]
     ValidateImage {
@@ -219,8 +213,6 @@ enum SessionAction {
     },
     /// Set a session property
     Set { key: String, value: String },
-    /// Remove orphaned throwaway containers for this session
-    Gc,
 }
 
 #[tokio::main]
@@ -234,11 +226,8 @@ async fn main() -> anyhow::Result<()> {
     let auto_yes = cli.yes;
 
     match cli.command {
-        Commands::List { active } => {
-            cmd_list(active).await?;
-        }
-        Commands::Gc => {
-            cmd_gc().await?;
+        Commands::List => {
+            cmd_list().await?;
         }
         Commands::ValidateImage { image, force } => {
             cmd_validate_image(&image, force).await?;
@@ -292,9 +281,6 @@ async fn main() -> anyhow::Result<()> {
                 SessionAction::Set { key, value } => {
                     eprintln!("Setting {}={} — not yet wired to metadata", key, value);
                 }
-                SessionAction::Gc => {
-                    cmd_session_gc(&name).await?;
-                }
             }
         }
         Commands::Sync { session, branch, filter, all, dry_run, .. } => {
@@ -327,7 +313,7 @@ fn require_session(name: Option<SessionName>) -> anyhow::Result<SessionName> {
     name.ok_or_else(|| anyhow::anyhow!("--session required"))
 }
 
-async fn cmd_list(active_only: bool) -> anyhow::Result<()> {
+async fn cmd_list() -> anyhow::Result<()> {
     let lc = lifecycle::Lifecycle::new()?;
     let docker = lc.docker_client();
 
@@ -335,14 +321,11 @@ async fn cmd_list(active_only: bool) -> anyhow::Result<()> {
     let volumes = docker.list_volumes(None::<bollard::volume::ListVolumesOptions<String>>).await?;
     let mut session_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
-    let volume_names: std::collections::HashSet<String> = volumes.volumes
-        .as_ref()
-        .map(|vols| vols.iter().map(|v| v.name.clone()).collect())
-        .unwrap_or_default();
-
-    for vol_name in &volume_names {
-        if let Some(name) = vol_name.strip_prefix("claude-session-") {
-            session_names.insert(name.to_string());
+    if let Some(vols) = volumes.volumes {
+        for vol in &vols {
+            if let Some(name) = vol.name.strip_prefix("claude-session-") {
+                session_names.insert(name.to_string());
+            }
         }
     }
 
@@ -365,13 +348,6 @@ async fn cmd_list(active_only: bool) -> anyhow::Result<()> {
                 }
             }
         }
-    }
-
-    // If --active, filter to only sessions with at least one volume
-    if active_only {
-        session_names.retain(|name| {
-            volume_names.contains(&format!("claude-session-{}", name))
-        });
     }
 
     if session_names.is_empty() {
@@ -947,14 +923,10 @@ async fn cmd_session_cleanup(name: &SessionName, auto_yes: bool) -> anyhow::Resu
     ).await;
 
     let script = "rm -f /session/.reconcile-complete /session/.merge-into-summary /session/.merge-into-branch /session/.sync-summary /session/.sync-branch 2>/dev/null; echo CLEANED";
-    let mut throwaway_labels = std::collections::HashMap::new();
-    throwaway_labels.insert(git_sandbox::THROWAWAY_LABEL.to_string(), "true".to_string());
-    throwaway_labels.insert(git_sandbox::SESSION_LABEL.to_string(), name.to_string());
     let config = bollard::container::Config {
         image: Some("alpine/git".to_string()),
         entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
         cmd: Some(vec![script.to_string()]),
-        labels: Some(throwaway_labels),
         host_config: Some(bollard::models::HostConfig {
             binds: Some(vec![format!("{}:/session", volume)]),
             ..Default::default()
@@ -978,83 +950,6 @@ async fn cmd_session_cleanup(name: &SessionName, auto_yes: bool) -> anyhow::Resu
     ).await;
 
     eprintln!("  {} Stale markers removed from session volume.", colored::Colorize::green("✓"));
-
-    // Also clean up any orphaned throwaway containers for this session
-    let removed = git_sandbox::gc_session_throwaway_containers(lc.docker_client(), name.as_str()).await?;
-    if !removed.is_empty() {
-        eprintln!("  {} Removed {} orphaned throwaway container(s).", colored::Colorize::green("✓"), removed.len());
-    }
-
-    Ok(())
-}
-
-/// Remove all orphaned throwaway containers across all sessions.
-async fn cmd_gc() -> anyhow::Result<()> {
-    let lc = lifecycle::Lifecycle::new()?;
-    let docker = lc.docker_client();
-
-    eprintln!("  Scanning for orphaned throwaway containers...");
-    let removed = git_sandbox::gc_throwaway_containers(docker).await?;
-
-    if removed.is_empty() {
-        eprintln!("  {} No orphaned containers found.", colored::Colorize::green("✓"));
-    } else {
-        for name in &removed {
-            eprintln!("  {} removed {}", colored::Colorize::green("✓"), name);
-        }
-        eprintln!("  {} Removed {} container(s).", colored::Colorize::green("✓"), removed.len());
-    }
-
-    // Also report volumes with no matching session metadata
-    let volumes = docker.list_volumes(None::<bollard::volume::ListVolumesOptions<String>>).await?;
-    let meta_dir = dirs::home_dir()
-        .unwrap_or_default()
-        .join(".config/claude-container/sessions");
-
-    if let Some(vols) = &volumes.volumes {
-        let mut orphan_volumes = Vec::new();
-        for vol in vols {
-            if let Some(session_name) = vol.name.strip_prefix("claude-session-") {
-                // Check if this session has metadata or a container
-                let meta_path = meta_dir.join(format!("{}.env", session_name));
-                let container_name = format!("claude-session-ctr-{}", session_name);
-                let has_container = docker.inspect_container(&container_name, None).await.is_ok();
-
-                if !meta_path.exists() && !has_container {
-                    orphan_volumes.push(session_name.to_string());
-                }
-            }
-        }
-
-        if !orphan_volumes.is_empty() {
-            eprintln!();
-            eprintln!("  {} {} session volume(s) with no metadata or container:", colored::Colorize::yellow("⚠"), orphan_volumes.len());
-            for name in &orphan_volumes {
-                eprintln!("    {} {}", colored::Colorize::dimmed("·"), name);
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Remove orphaned throwaway containers for a specific session.
-async fn cmd_session_gc(name: &SessionName) -> anyhow::Result<()> {
-    let lc = lifecycle::Lifecycle::new()?;
-    let docker = lc.docker_client();
-
-    eprintln!("  Scanning for throwaway containers in session '{}'...", name);
-    let removed = git_sandbox::gc_session_throwaway_containers(docker, name.as_str()).await?;
-
-    if removed.is_empty() {
-        eprintln!("  {} No orphaned containers found.", colored::Colorize::green("✓"));
-    } else {
-        for ctr_name in &removed {
-            eprintln!("  {} removed {}", colored::Colorize::green("✓"), ctr_name);
-        }
-        eprintln!("  {} Removed {} container(s).", colored::Colorize::green("✓"), removed.len());
-    }
-
     Ok(())
 }
 
@@ -1105,15 +1000,10 @@ done
         Some(bollard::container::RemoveContainerOptions { force: true, ..Default::default() }),
     ).await;
 
-    let mut verify_labels = std::collections::HashMap::new();
-    verify_labels.insert(git_sandbox::THROWAWAY_LABEL.to_string(), "true".to_string());
-    verify_labels.insert(git_sandbox::SESSION_LABEL.to_string(), name.to_string());
-
     let config = bollard::container::Config {
         image: Some("alpine/git".to_string()),
         entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
         cmd: Some(vec![script]),
-        labels: Some(verify_labels),
         host_config: Some(bollard::models::HostConfig {
             binds: Some(binds),
             ..Default::default()
@@ -1212,16 +1102,11 @@ async fn cmd_session_fix(name: &SessionName, auto_yes: bool) -> anyhow::Result<(
         Some(bollard::container::RemoveContainerOptions { force: true, ..Default::default() }),
     ).await;
 
-    let mut fix_labels = std::collections::HashMap::new();
-    fix_labels.insert(git_sandbox::THROWAWAY_LABEL.to_string(), "true".to_string());
-    fix_labels.insert(git_sandbox::SESSION_LABEL.to_string(), name.to_string());
-
     let config = bollard::container::Config {
         image: Some("alpine/git".to_string()),
         user: Some("0:0".to_string()), // run as root to chown
         entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
         cmd: Some(vec![script]),
-        labels: Some(fix_labels),
         host_config: Some(bollard::models::HostConfig {
             binds: Some(binds),
             ..Default::default()
@@ -1301,15 +1186,10 @@ async fn cmd_session_set_dir(name: &SessionName, target: Option<&str>) -> anyhow
                 Some(bollard::container::RemoveContainerOptions { force: true, ..Default::default() }),
             ).await;
 
-            let mut setdir_labels = std::collections::HashMap::new();
-            setdir_labels.insert(git_sandbox::THROWAWAY_LABEL.to_string(), "true".to_string());
-            setdir_labels.insert(git_sandbox::SESSION_LABEL.to_string(), name.to_string());
-
             let config = bollard::container::Config {
                 image: Some("alpine/git".to_string()),
                 entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
                 cmd: Some(vec!["rm -f /session/.main-project".to_string()]),
-                labels: Some(setdir_labels),
                 host_config: Some(bollard::models::HostConfig {
                     binds: Some(vec![format!("{}:/session", volume)]),
                     ..Default::default()
@@ -1512,8 +1392,10 @@ async fn cmd_pull(name: &SessionName, branch: &str, filter: Option<&str>, includ
     // Collect info before consuming plan
     let has_clean = plan.action.repo_actions.iter()
         .any(|a| matches!(a.decision, types::SyncDecision::Pull { .. } | types::SyncDecision::CloneToHost));
+    let has_merge_to_target = plan.action.repo_actions.iter()
+        .any(|a| matches!(a.decision, types::SyncDecision::MergeToTarget { .. }));
     let pending_merge_repos: Vec<(String, std::path::PathBuf)> = plan.action.repo_actions.iter()
-        .filter(|a| a.session_ahead_of_target > 0 && matches!(a.decision, types::SyncDecision::Skip { .. }))
+        .filter(|a| matches!(a.decision, types::SyncDecision::MergeToTarget { .. }))
         .filter_map(|a| a.host_path.clone().map(|p| (a.repo_name.clone(), p)))
         .collect();
     struct DivergedInfo {
@@ -1775,7 +1657,7 @@ async fn offer_reconciliation(
         lc, ready, name, &script_dir, conflicts,
     ).await?;
 
-    if let Some(desc) = reconciled {
+    if let Some(_desc) = reconciled {
         eprintln!();
         eprintln!("  {} Reconciliation complete. Re-extracting...", colored::Colorize::green("✓"));
 

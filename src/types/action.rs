@@ -77,9 +77,7 @@ pub struct RepoSyncAction {
     pub inbound_diff: Option<DiffSummary>,
     /// Trial merge result: None = not tested, Some(empty) = clean, Some(files) = conflicts
     pub trial_conflicts: Option<Vec<String>>,
-    /// Session branch is ahead of target by N commits (needs merge even if container unchanged)
-    pub session_ahead_of_target: u32,
-    /// Diff from target to session branch (the pending merge)
+    /// Diff from target to session branch (for MergeToTarget decisions)
     pub session_to_target_diff: Option<DiffSummary>,
 }
 
@@ -115,6 +113,11 @@ impl SessionSyncPlan {
     pub fn skipped(&self) -> Vec<&RepoSyncAction> {
         self.repo_actions.iter()
             .filter(|a| matches!(a.decision, super::git::SyncDecision::Skip { .. }))
+            .collect()
+    }
+    pub fn pending_merges(&self) -> Vec<&RepoSyncAction> {
+        self.repo_actions.iter()
+            .filter(|a| matches!(a.decision, super::git::SyncDecision::MergeToTarget { .. }))
             .collect()
     }
     pub fn has_work(&self) -> bool {

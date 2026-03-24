@@ -544,6 +544,7 @@ async fn test_classify_repo() {
             | git_sandbox::types::SyncDecision::Pull { .. }
             | git_sandbox::types::SyncDecision::Push { .. }
             | git_sandbox::types::SyncDecision::Reconcile { .. }
+            | git_sandbox::types::SyncDecision::MergeToTarget { .. }
             | git_sandbox::types::SyncDecision::CloneToHost
             | git_sandbox::types::SyncDecision::PushToContainer
             | git_sandbox::types::SyncDecision::Blocked { .. } => {}

@@ -20,14 +20,6 @@ use crate::types::{
     SessionSyncPlan, SquashState, SyncDecision, SyncResult, TargetAheadKind, VolumeRepo,
 };
 
-/// Build the standard labels HashMap for a throwaway container.
-fn throwaway_labels(session: &SessionName) -> std::collections::HashMap<String, String> {
-    let mut labels = std::collections::HashMap::new();
-    labels.insert(crate::types::THROWAWAY_LABEL.to_string(), "true".to_string());
-    labels.insert(crate::types::SESSION_LABEL.to_string(), session.to_string());
-    labels
-}
-
 /// Git utility image used for container-side scans.
 const GIT_UTIL_IMAGE: &str = "alpine/git";
 
@@ -87,7 +79,6 @@ impl SyncEngine {
             image: Some(GIT_UTIL_IMAGE.to_string()),
             entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
             cmd: Some(vec![SCAN_SCRIPT.to_string()]),
-            labels: Some(throwaway_labels(session)),
             host_config: Some(bollard::models::HostConfig {
                 binds: Some(vec![format!("{}:/session:ro", volume_name)]),
                 ..Default::default()
@@ -157,19 +148,21 @@ impl SyncEngine {
 
     /// Build a `RepoPair` for a single repo by comparing container state
     /// (from snapshot) against host state (via git2).
+    ///
+    /// The triple: container HEAD vs session branch HEAD vs target branch HEAD.
     pub fn classify_repo(
         &self,
         repo_name: &str,
         container: &VolumeRepo,
         host_path: &Path,
         session_name: &str,
-        _target_branch: &str,
+        target_branch: &str,
     ) -> RepoPair {
         // Container side
         let container_side = volume_repo_to_gitside(container);
 
         // Host side — open repo via git2
-        let (host_side, relation) = match Repository::open(host_path) {
+        let (host_side, relation, target_head, session_to_target) = match Repository::open(host_path) {
             Ok(repo) => {
                 let host_side = read_host_side(&repo, session_name);
                 let relation = match (container_side.head(), host_side.head()) {
@@ -178,7 +171,15 @@ impl SyncEngine {
                     }
                     _ => None,
                 };
-                (host_side, relation)
+
+                // Read target branch state (the third leg of the triple)
+                let (t_head, st_rel) = if !target_branch.is_empty() {
+                    read_target_state(&repo, session_name, target_branch, host_side.head(), self, host_path)
+                } else {
+                    (None, None)
+                };
+
+                (host_side, relation, t_head, st_rel)
             }
             Err(_) => {
                 if host_path.exists() {
@@ -187,9 +188,11 @@ impl SyncEngine {
                             path: host_path.to_path_buf(),
                         },
                         None,
+                        None,
+                        None,
                     )
                 } else {
-                    (GitSide::Missing, None)
+                    (GitSide::Missing, None, None, None)
                 }
             }
         };
@@ -199,6 +202,8 @@ impl SyncEngine {
             container: container_side,
             host: host_side,
             relation,
+            target_head,
+            session_to_target,
         }
     }
 
@@ -295,35 +300,17 @@ impl SyncEngine {
                 _ => None,
             };
 
-            // Check if session branch is ahead of target (pending merge)
-            let session_name_str = session.to_string();
-            let (session_ahead_of_target, session_to_target_diff) = if !target_branch.is_empty() {
-                match Repository::open(&host_path) {
-                    Ok(repo) => {
-                        let session_ref = format!("refs/heads/{}", session_name_str);
-                        let target_ref = format!("refs/heads/{}", target_branch);
-                        let session_oid = repo.find_reference(&session_ref).ok()
-                            .and_then(|r| r.peel_to_commit().ok()).map(|c| c.id());
-                        let target_oid = repo.find_reference(&target_ref).ok()
-                            .and_then(|r| r.peel_to_commit().ok()).map(|c| c.id());
-                        match (session_oid, target_oid) {
-                            (Some(s), Some(t)) if s != t => {
-                                let ahead = repo.graph_ahead_behind(s, t)
-                                    .map(|(a, _)| a as u32).unwrap_or(0);
-                                let diff = if ahead > 0 {
-                                    let s_hash = CommitHash::new(s.to_string());
-                                    let t_hash = CommitHash::new(t.to_string());
-                                    self.compute_diff(&host_path, &t_hash, &s_hash)
-                                } else { None };
-                                (ahead, diff)
-                            }
-                            _ => (0, None),
-                        }
-                    }
-                    Err(_) => (0, None),
+            // Compute session→target diff for MergeToTarget decisions
+            let session_to_target_diff = match &decision {
+                SyncDecision::MergeToTarget { .. } => {
+                    // Get the diff from target to session
+                    pair.target_head.as_ref().and_then(|t_head| {
+                        pair.host.head().and_then(|s_head| {
+                            self.compute_diff(&host_path, t_head, s_head)
+                        })
+                    })
                 }
-            } else {
-                (0, None)
+                _ => None,
             };
 
             repo_actions.push(RepoSyncAction {
@@ -333,7 +320,6 @@ impl SyncEngine {
                 outbound_diff,
                 inbound_diff,
                 trial_conflicts,
-                session_ahead_of_target,
                 session_to_target_diff,
             });
         }
@@ -628,7 +614,6 @@ echo "BUNDLE_OK"
             image: Some(GIT_UTIL_IMAGE.to_string()),
             entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
             cmd: Some(vec![script]),
-            labels: Some(throwaway_labels(session)),
             host_config: Some(bollard::models::HostConfig {
                 binds: Some(vec![
                     format!("{}:/session:ro", volume_name),
@@ -1072,7 +1057,6 @@ echo "Cloned $(git rev-parse --short HEAD) on $(git symbolic-ref --short HEAD 2>
             image: Some(GIT_UTIL_IMAGE.to_string()),
             entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
             cmd: Some(vec![script]),
-            labels: Some(throwaway_labels(session)),
             host_config: Some(bollard::models::HostConfig {
                 binds: Some(vec![
                     format!("{}:/session", volume_name),
@@ -1165,7 +1149,6 @@ echo "Cloned $(git rev-parse --short HEAD) on $(git symbolic-ref --short HEAD 2>
             image: Some(GIT_UTIL_IMAGE.to_string()),
             entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
             cmd: Some(vec![format!("echo '{}' > /session/.main-project", main_project)]),
-            labels: Some(throwaway_labels(session)),
             host_config: Some(bollard::models::HostConfig {
                 binds: Some(vec![format!("{}:/session", volume_name)]),
                 ..Default::default()
@@ -1228,7 +1211,6 @@ git remote remove _cc_upstream 2>/dev/null
             image: Some(GIT_UTIL_IMAGE.to_string()),
             entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
             cmd: Some(vec![script]),
-            labels: Some(throwaway_labels(session)),
             host_config: Some(bollard::models::HostConfig {
                 binds: Some(vec![
                     format!("{}:/session", volume_name),
@@ -1445,6 +1427,31 @@ git remote remove _cc_upstream 2>/dev/null
                     }
                 }
 
+                SyncDecision::MergeToTarget { .. } => {
+                    // Session branch already has the work, just needs merge to target.
+                    // No extraction needed — just merge session → target.
+                    match self.merge(&host_path, &session_branch, &target_branch, true) {
+                        Ok(merge) => {
+                            if let MergeOutcome::Conflict { files } = &merge {
+                                RepoSyncResult::Conflicted {
+                                    repo_name: action.repo_name.clone(),
+                                    files: files.clone(),
+                                }
+                            } else {
+                                RepoSyncResult::Pulled {
+                                    repo_name: action.repo_name.clone(),
+                                    extract: ExtractResult { commit_count: 0, new_head: CommitHash::new("".to_string()) },
+                                    merge,
+                                }
+                            }
+                        }
+                        Err(e) => RepoSyncResult::Failed {
+                            repo_name: action.repo_name.clone(),
+                            error: e.to_string(),
+                        },
+                    }
+                }
+
                 SyncDecision::Blocked { reason } => {
                     RepoSyncResult::Skipped {
                         repo_name: action.repo_name.clone(),
@@ -1551,6 +1558,60 @@ fn volume_repo_to_gitside(vr: &VolumeRepo) -> GitSide {
             head: vr.head.clone(),
         }
     }
+}
+
+/// Read the target branch HEAD and compute session→target relationship.
+/// Returns (target_head, session_to_target_relation).
+fn read_target_state(
+    repo: &Repository,
+    session_name: &str,
+    target_branch: &str,
+    session_head: Option<&CommitHash>,
+    engine: &SyncEngine,
+    host_path: &Path,
+) -> (Option<CommitHash>, Option<crate::types::git::SessionTargetRelation>) {
+    let target_ref = format!("refs/heads/{}", target_branch);
+    let target_oid = match repo.find_reference(&target_ref) {
+        Ok(r) => match r.peel_to_commit() {
+            Ok(c) => c.id(),
+            Err(_) => return (None, None),
+        },
+        Err(_) => return (None, None),
+    };
+    let target_head = CommitHash::new(target_oid.to_string());
+
+    let session_head = match session_head {
+        Some(h) => h,
+        None => return (Some(target_head), None),
+    };
+
+    let session_ref = format!("refs/heads/{}", session_name);
+    let session_oid = match repo.find_reference(&session_ref) {
+        Ok(r) => match r.peel_to_commit() {
+            Ok(c) => c.id(),
+            Err(_) => return (Some(target_head), None),
+        },
+        Err(_) => return (Some(target_head), None),
+    };
+
+    if session_oid == target_oid {
+        return (Some(target_head), Some(crate::types::git::SessionTargetRelation {
+            ancestry: Ancestry::Same,
+            content: ContentComparison::Identical,
+        }));
+    }
+
+    // Compute ancestry between session and target
+    let repo_path = repo.workdir().unwrap_or_else(|| repo.path());
+    let ancestry = engine.check_ancestry(repo_path, session_head, &target_head);
+
+    // Compute content comparison
+    let content = compute_content_comparison(repo, session_head, &target_head);
+
+    (Some(target_head), Some(crate::types::git::SessionTargetRelation {
+        ancestry,
+        content,
+    }))
 }
 
 /// Read the host-side git state for the session branch.

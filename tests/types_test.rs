@@ -41,6 +41,8 @@ fn pair(name: &str, container: GitSide, host: GitSide, relation: Option<PairRela
         container,
         host,
         relation,
+        target_head: None,
+        session_to_target: None,
     }
 }
 
