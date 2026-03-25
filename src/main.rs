@@ -1472,28 +1472,22 @@ async fn cmd_pull(name: &SessionName, branch: &str, filter: Option<&str>, includ
     // Without extraction, trial merge says "unknown" for diverged repos.
     if has_extractable {
         let session_branch = name.to_string();
-        if confirm("\n  Extract repos to session branch?", auto_yes) {
-            let spinner = indicatif::ProgressBar::new_spinner();
-            spinner.set_style(indicatif::ProgressStyle::default_spinner()
-                .template("  {spinner:.blue} Extracting {msg}...").unwrap()
-                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"));
-            spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+        let spinner = indicatif::ProgressBar::new_spinner();
+        spinner.set_style(indicatif::ProgressStyle::default_spinner()
+            .template("  {spinner:.blue} Fetching {msg}...").unwrap()
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"));
+        spinner.enable_steady_tick(std::time::Duration::from_millis(80));
 
-            for action in &initial_plan.action.repo_actions {
-                if matches!(action.decision, types::SyncDecision::Skip { .. } | types::SyncDecision::MergeToTarget { .. }) {
-                    continue;
-                }
-                if let Some(host_path) = repo_paths.get(&action.repo_name) {
-                    spinner.set_message(action.repo_name.clone());
-                    let _ = engine.extract(name, &action.repo_name, host_path, &session_branch).await;
-                }
+        for action in &initial_plan.action.repo_actions {
+            if matches!(action.decision, types::SyncDecision::Skip { .. } | types::SyncDecision::MergeToTarget { .. }) {
+                continue;
             }
-            spinner.finish_and_clear();
-            eprintln!("  {} Extracted to session branch '{}'", colored::Colorize::green("✓"), session_branch);
-        } else {
-            eprintln!("  Aborted.");
-            return Ok(());
+            if let Some(host_path) = repo_paths.get(&action.repo_name) {
+                spinner.set_message(action.repo_name.clone());
+                let _ = engine.extract(name, &action.repo_name, host_path, &session_branch).await;
+            }
         }
+        spinner.finish_and_clear();
     }
 
     // Phase 3: Re-plan with accurate data (container commits now on host)
