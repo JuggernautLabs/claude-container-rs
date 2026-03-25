@@ -23,10 +23,10 @@ With:
 ```rust
 DoesNotExist(SessionName),
 VolumesOnly { name, metadata, volumes },
-Active { name, metadata, volumes, containers: Vec<SessionContainer> },
+Active { name, metadata, volumes, containers: Vec<ContainerNode> },
 ```
 
-`Active` replaces both `Stopped` and `Running`. The per-container state is in `SessionContainer.state`.
+`Active` replaces both `Stopped` and `Running`. The per-container state is in `ContainerNode.state`. The tree structure is in `ContainerNode.parent`.
 
 ### list_session_containers() (`src/lifecycle/mod.rs`)
 
@@ -69,15 +69,33 @@ pub async fn discover(&self, name: &SessionName) -> Result<DiscoveredSession> {
 
 ```rust
 impl DiscoveredSession {
-    /// The "active" container — whichever is running. Work takes priority unless reconcile is running.
-    pub fn active_container(&self) -> Option<&SessionContainer> { ... }
+    /// The "active" container — whichever is running. Reconcile takes priority over Work.
+    pub fn active_container(&self) -> Option<&ContainerNode> { ... }
 
     /// Find container by role
-    pub fn container(&self, role: &ContainerRole) -> Option<&SessionContainer> { ... }
+    pub fn container(&self, role: &ContainerRole) -> Option<&ContainerNode> { ... }
+
+    /// The root container (Work, parent=None)
+    pub fn root(&self) -> Option<&ContainerNode> { ... }
+
+    /// Children of a given container
+    pub fn children_of(&self, name: &ContainerName) -> Vec<&ContainerNode> { ... }
 
     /// Is any container running?
     pub fn has_running(&self) -> bool { ... }
 }
+```
+
+### Rendering the tree
+
+```
+session: hypno
+  ● work         running   claude-session-ctr-hypno
+    ○ reconcile  stopped   claude-reconcile-ctr-hypno    (spawned by work)
+    · experiment no ctr    claude-fork-experiment-ctr-hypno (forked from work)
+```
+
+Indentation follows parent→child. Orphaned nodes (parent deleted) show at root level with a note.
 ```
 
 ### Update all callers of DiscoveredSession
@@ -105,7 +123,7 @@ fn discover_volumes_only_when_no_containers() {
 #[test]
 fn discover_backwards_compat_single_container() {
     // Given: only claude-session-ctr-foo exists (old naming)
-    // Returns Active with one container, role=Work
+    // Returns Active with one container, role=Work, parent=None
 }
 
 #[test]
@@ -113,6 +131,22 @@ fn container_by_role() {
     // Given: Active with work + reconcile
     // container(Reconcile) returns the reconcile one
     // container(Fork("x")) returns None
+}
+
+#[test]
+fn tree_structure_parent_child() {
+    // Given: work (root), reconcile (parent=work)
+    // root() returns work
+    // children_of(work.name) returns [reconcile]
+    // reconcile.parent_alive([work, reconcile]) returns Some(work)
+}
+
+#[test]
+fn orphaned_child_parent_deleted() {
+    // Given: reconcile exists but work was deleted
+    // reconcile.parent = Some("claude-session-ctr-foo")
+    // reconcile.parent_alive([reconcile]) returns None
+    // reconcile still renders at root level with "(parent deleted)" note
 }
 ```
 

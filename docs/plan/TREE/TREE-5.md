@@ -14,7 +14,7 @@ All commands assume the default (Work) container. No way to start, stop, attach,
 ```rust
 Start {
     #[arg(short = 'c', long = "container")]
-    container: Option<String>,  // parsed into ContainerRole
+    container: Option<String>,  // parsed into ContainerRole at boundary
     ...
 }
 ```
@@ -24,6 +24,19 @@ Parsing:
 - "reconcile" → `ContainerRole::Reconcile`
 - "run" → `ContainerRole::Runner`
 - anything else → `ContainerRole::Fork(value)`
+
+### Parent tracking when spawning
+
+When starting a non-Work container, the parent is the currently active container:
+
+```rust
+let parent = discovered.active_container().map(|c| c.name.clone());
+// Store parent as a Docker label on the new container:
+//   claude-container.parent=claude-session-ctr-hypno
+// Recovered during discovery via inspect → labels
+```
+
+The parent is stored as a Docker label (not in metadata files) so it survives across process invocations and is always in sync with the actual container.
 
 ### `-c` flag on session stop/rebuild/exec
 
