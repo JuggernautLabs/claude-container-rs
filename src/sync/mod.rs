@@ -940,7 +940,7 @@ echo "BUNDLE_OK"
 
             // Create a squash commit (single parent = target)
             let sig = repo.signature().unwrap_or_else(|_| {
-                git2::Signature::now("claude-container", "cc@localhost").unwrap()
+                git2::Signature::now("git-sandbox", "git-sandbox@local").unwrap()
             });
             let message = format!(
                 "squash: {} commit(s) from session branch {}",
@@ -1013,7 +1013,7 @@ echo "BUNDLE_OK"
         let tree = repo.find_tree(tree_id)?;
 
         let sig = repo.signature().unwrap_or_else(|_| {
-            git2::Signature::now("claude-container", "cc@localhost").unwrap()
+            git2::Signature::now("git-sandbox", "git-sandbox@local").unwrap()
         });
         let message = format!(
             "Merge session branch {} into {}",
@@ -1360,8 +1360,8 @@ git remote remove _cc_upstream 2>/dev/null
             r#"
 export HOME=/tmp
 git config --global --add safe.directory "*"
-git config --global user.email "claude-container@local"
-git config --global user.name "claude-container"
+git config --global user.email "git-sandbox@local"
+git config --global user.name "git-sandbox"
 cd "/session/{repo_name}" 2>/dev/null || {{ echo "ERROR|cd failed"; exit 0; }}
 git remote remove _upstream 2>/dev/null || true
 git remote add _upstream "/upstream"
