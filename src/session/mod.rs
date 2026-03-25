@@ -393,9 +393,9 @@ impl SessionManager {
         cfg_labels.insert(crate::types::SESSION_LABEL.to_string(), name.to_string());
 
         let config = bollard::container::Config {
-            image: Some("alpine:latest".to_string()),
+            image: Some("alpine/git".to_string()),
+            entrypoint: Some(vec!["cat".to_string()]),
             cmd: Some(vec![
-                "cat".to_string(),
                 "/session/.claude-projects.yml".to_string(),
             ]),
             labels: Some(cfg_labels),
@@ -686,7 +686,7 @@ done
 
         use crate::types::docker::{throwaway_config, VolumeMount, RunAs};
         let cfg = throwaway_config(
-            "alpine:latest",
+            "alpine/git",
             &script,
             &[VolumeMount::Writable { source: volume_name.to_string(), target: "/session".into() }],
             &RunAs::developer(),
