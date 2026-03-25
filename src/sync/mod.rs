@@ -35,9 +35,12 @@ pub enum MergeIntoResult {
 }
 
 fn rand_suffix() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-    format!("{:x}", t.as_nanos() % 0xFFFFFF)
+    let c = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{:x}{:x}", t.as_nanos() % 0xFFFFFFFF, c)
 }
 
 /// Shell script injected into the scanner container.
