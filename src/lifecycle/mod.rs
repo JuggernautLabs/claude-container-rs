@@ -156,6 +156,40 @@ impl Lifecycle {
     }
 
     // ========================================================================
+    // Utility image
+    // ========================================================================
+
+    /// Ensure the utility image (alpine/git) is available locally.
+    /// Pulls it if missing. Cached for the process lifetime — only checks once.
+    pub async fn ensure_util_image(&self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static CHECKED: AtomicBool = AtomicBool::new(false);
+        if CHECKED.load(Ordering::Relaxed) { return; }
+
+
+        let image = "alpine/git";
+        if self.docker.inspect_image(image).await.is_ok() {
+            CHECKED.store(true, Ordering::Relaxed);
+            return;
+        }
+
+        eprintln!("  Pulling {}...", image);
+        use bollard::image::CreateImageOptions;
+        let mut stream = self.docker.create_image(
+            Some(CreateImageOptions { from_image: image, ..Default::default() }),
+            None, None,
+        );
+        while let Some(result) = stream.next().await {
+            if let Err(e) = result {
+                eprintln!("  {} Failed to pull {}: {}", "⚠", image, e);
+                return;
+            }
+        }
+        eprintln!("  {} Pulled {}", "✓", image);
+        CHECKED.store(true, Ordering::Relaxed);
+    }
+
+    // ========================================================================
     // Image operations
     // ========================================================================
 

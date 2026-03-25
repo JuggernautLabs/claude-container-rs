@@ -484,6 +484,7 @@ async fn cmd_start(
     initial_prompt: Option<String>,
 ) -> anyhow::Result<()> {
     let lc = lifecycle::Lifecycle::new()?;
+    lc.ensure_util_image().await;
     let sm = session::SessionManager::new(lc.docker_client().clone());
     let discovered = sm.discover(name).await?;
     eprintln!("{}", colored::Colorize::blue(format!("→ Session: {}", name).as_str()));
@@ -1292,6 +1293,7 @@ async fn cmd_sync_preview(name: &SessionName, branch: &str, filter: Option<&str>
 /// Shows a diff preview of what changed in the container vs the host.
 async fn cmd_extract(name: &SessionName, filter: Option<&str>, dry_run: bool, auto_yes: bool) -> anyhow::Result<()> {
     let lc = lifecycle::Lifecycle::new()?;
+    lc.ensure_util_image().await;
     let sm = session::SessionManager::new(lc.docker_client().clone());
 
     let config = sm.read_or_discover_config(name).await?;
@@ -1795,6 +1797,7 @@ async fn build_sync_plan(
     std::collections::BTreeMap<String, std::path::PathBuf>,
 )> {
     let lc = lifecycle::Lifecycle::new()?;
+    lc.ensure_util_image().await;
     let sm = session::SessionManager::new(lc.docker_client().clone());
 
     let config = sm.read_or_discover_config(name).await?;
