@@ -524,7 +524,8 @@ fn determine_launch_path(
                     eprintln!("  Using current directory: {}", repo_name);
                     vec![types::RepoConfig { name: repo_name, host_path: cwd, branch }]
                 } else {
-                    anyhow::bail!("No repos to create session. Use --discover-repos <dir> or run from a git repo.");
+                    eprintln!("  {} Not in a git repo — starting with empty workspace.", colored::Colorize::dimmed("·"));
+                    vec![]
                 }
             };
 
