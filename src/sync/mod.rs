@@ -23,6 +23,17 @@ use crate::types::{
 /// Git utility image used for container-side scans.
 const GIT_UTIL_IMAGE: &str = "alpine/git";
 
+/// Result of merging a host branch into a container repo.
+#[derive(Debug)]
+pub enum MergeIntoResult {
+    /// Merge completed cleanly (auto-committed)
+    CleanMerge,
+    /// Merge has conflicts — <<<<<<< markers left in working tree
+    Conflict { files: Vec<String> },
+    /// Already up to date (host branch is ancestor of container HEAD)
+    AlreadyUpToDate,
+}
+
 fn rand_suffix() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
@@ -1318,6 +1329,135 @@ git remote remove _cc_upstream 2>/dev/null
         }
 
         Ok(())
+    }
+
+    // ========================================================================
+    // Merge-into: host branch → container repo (with conflict preservation)
+    // ========================================================================
+
+    /// Merge a host branch INTO a container repo, preserving conflict markers.
+    /// Unlike inject (which uses --no-edit and fails on conflict), this leaves
+    /// <<<<<<< markers in the working tree for Claude to resolve.
+    pub async fn merge_into_volume(
+        &self,
+        session: &SessionName,
+        repo_name: &str,
+        host_path: &Path,
+        target_branch: &str,
+    ) -> Result<MergeIntoResult, ContainerError> {
+        let volume_name = session.session_volume();
+        let container_name = format!("cc-mergein-{}-{}", session, rand_suffix());
+        let _ = self.docker.remove_container(
+            &container_name,
+            Some(RemoveContainerOptions { force: true, ..Default::default() }),
+        ).await;
+
+        let host_path_str = host_path.to_string_lossy().to_string();
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+
+        let script = format!(
+            r#"
+export HOME=/tmp
+git config --global --add safe.directory "*"
+git config --global user.email "claude-container@local"
+git config --global user.name "claude-container"
+cd "/session/{repo_name}" 2>/dev/null || {{ echo "ERROR|cd failed"; exit 0; }}
+git remote remove _upstream 2>/dev/null || true
+git remote add _upstream "/upstream"
+fetch_out=$(git fetch _upstream "{target_branch}" 2>&1) || {{
+    echo "ERROR|fetch failed: $(echo "$fetch_out" | tr '\n' ' ')"
+    git remote remove _upstream 2>/dev/null || true
+    exit 0
+}}
+merge_out=$(git merge "_upstream/{target_branch}" --no-edit 2>&1)
+merge_rc=$?
+git remote remove _upstream 2>/dev/null || true
+if echo "$merge_out" | grep -qE "CONFLICT|Automatic merge failed"; then
+    echo "CONFLICT"
+    git diff --name-only --diff-filter=U 2>/dev/null
+elif [ $merge_rc -ne 0 ]; then
+    echo "ERROR|$(echo "$merge_out" | tr '\n' ' ')"
+elif echo "$merge_out" | grep -q "Already up to date"; then
+    echo "UPTODATE"
+else
+    echo "MERGED"
+fi
+"#,
+            repo_name = repo_name,
+            target_branch = target_branch,
+        );
+
+        // Run as root (volume may be root-owned), chown conflicts would be worse
+        let config = ContainerConfig {
+            image: Some(GIT_UTIL_IMAGE.to_string()),
+            user: Some(format!("{}:{}", uid, gid)),
+            entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
+            cmd: Some(vec![script]),
+            host_config: Some(bollard::models::HostConfig {
+                binds: Some(vec![
+                    format!("{}:/session", volume_name),
+                    format!("{}:/upstream:ro", host_path_str),
+                ]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let opts = CreateContainerOptions { name: &container_name, platform: None };
+        self.docker.create_container(Some(opts), config).await?;
+        self.docker.start_container(&container_name, None::<StartContainerOptions<String>>).await?;
+
+        // Wait
+        let mut wait_stream = self.docker.wait_container(&container_name, None::<WaitContainerOptions<String>>);
+        while let Some(result) = wait_stream.next().await {
+            match result {
+                Ok(_) => {}
+                Err(bollard::errors::Error::DockerContainerWaitError { .. }) => {}
+                Err(_) => {}
+            }
+        }
+
+        // Collect output
+        let mut stdout = String::new();
+        let mut log_stream = self.docker.logs(
+            &container_name,
+            Some(LogsOptions::<String> { stdout: true, stderr: true, follow: false, ..Default::default() }),
+        );
+        while let Some(chunk) = log_stream.next().await {
+            if let Ok(output) = chunk { stdout.push_str(&output.to_string()); }
+        }
+
+        let _ = self.docker.remove_container(
+            &container_name,
+            Some(RemoveContainerOptions { force: true, ..Default::default() }),
+        ).await;
+
+        // Parse output
+        let first_line = stdout.lines().next().unwrap_or("").trim();
+        match first_line {
+            "MERGED" => Ok(MergeIntoResult::CleanMerge),
+            "UPTODATE" => Ok(MergeIntoResult::AlreadyUpToDate),
+            "CONFLICT" => {
+                let files: Vec<String> = stdout.lines().skip(1)
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect();
+                Ok(MergeIntoResult::Conflict { files })
+            }
+            other if other.starts_with("ERROR|") => {
+                Err(ContainerError::InjectionFailed {
+                    repo: repo_name.to_string(),
+                    reason: other.strip_prefix("ERROR|").unwrap_or(other).to_string(),
+                })
+            }
+            _ => {
+                Err(ContainerError::InjectionFailed {
+                    repo: repo_name.to_string(),
+                    reason: format!("unexpected output: {}", stdout.lines().take(3).collect::<Vec<_>>().join(" ")),
+                })
+            }
+        }
     }
 
     // ========================================================================

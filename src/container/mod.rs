@@ -429,21 +429,52 @@ pub async fn launch_reconciliation(
     // Clean up any leftover reconciliation container
     let _ = lc.remove_container(&reconcile_ctr).await;
 
+    // Merge target branch INTO session volume repos — creates real conflict markers
+    eprintln!("  Merging target branch into session repos...");
+    let engine = crate::sync::SyncEngine::new(lc.docker_client().clone());
+    let mut actual_conflicts: Vec<(String, Vec<String>)> = Vec::new();
+    for (repo_name, host_path, _trial_files) in conflict_repos.iter() {
+        match engine.merge_into_volume(session_name, repo_name, host_path, "main").await {
+            Ok(crate::sync::MergeIntoResult::Conflict { files }) => {
+                eprintln!("    {} {} — conflict in {} file(s)", colored::Colorize::red("✗"), repo_name, files.len());
+                actual_conflicts.push((repo_name.clone(), files));
+            }
+            Ok(crate::sync::MergeIntoResult::CleanMerge) => {
+                eprintln!("    {} {} — merged cleanly", colored::Colorize::green("✓"), repo_name);
+            }
+            Ok(crate::sync::MergeIntoResult::AlreadyUpToDate) => {
+                eprintln!("    {} {} — already up to date", colored::Colorize::dimmed("·"), repo_name);
+            }
+            Err(e) => {
+                eprintln!("    {} {} — {}", colored::Colorize::yellow("⚠"), repo_name, e);
+            }
+        }
+    }
+
+    if actual_conflicts.is_empty() {
+        eprintln!("  {} All repos merged cleanly. No conflicts to resolve.", colored::Colorize::green("✓"));
+        return Ok(None);
+    }
+
     let mut args = build_create_args(&ready, session_name, script_dir, &LaunchOptions::default());
 
     // Set agent task
     args.env.push("AGENT_TASK=resolve-conflicts".to_string());
 
-    // Build conflict summary
-    let mut summary = String::from("Merge conflicts detected during pull:\n\n");
-    for (repo_name, _, files) in conflict_repos {
+    // Build conflict summary from ACTUAL merge results (not trial merge predictions)
+    let mut summary = String::from("I've merged the target branch into your session repos.\n\n");
+    summary.push_str("The following repos have merge conflicts that need resolving:\n\n");
+    for (repo_name, files) in &actual_conflicts {
         summary.push_str(&format!("## {}\n", repo_name));
+        summary.push_str("Conflicted files:\n");
         for f in files {
             summary.push_str(&format!("  - {}\n", f));
         }
         summary.push('\n');
     }
-    summary.push_str("Resolve all conflicts, commit, then run: fin \"<description>\"\n");
+    summary.push_str("Run `git status` in each repo to see the conflict markers (<<<<<<< HEAD).\n");
+    summary.push_str("After resolving each file: `git add <file>`\n");
+    summary.push_str("After all conflicts resolved: `git commit` then `fin \"<description>\"`\n");
 
     let context_b64 = base64_encode(&summary);
     args.env.push(format!("AGENT_CONTEXT={}", context_b64));
