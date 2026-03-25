@@ -739,8 +739,25 @@ async fn attach_container(
         std::process::exit(0);
     });
 
+    // Spawn a container wait task — when the container exits, abort stdin
+    // so the attach connection closes cleanly (no "press enter to exit")
+    let docker_for_wait = docker.clone();
+    let name_for_wait = container_name.as_str().to_string();
+    let stdin_handle_clone = stdin_handle.abort_handle();
+    let container_exited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let container_exited_clone = container_exited.clone();
+    let _wait_handle = tokio::spawn(async move {
+        let mut wait = docker_for_wait.wait_container(
+            &name_for_wait,
+            Some(bollard::container::WaitContainerOptions { condition: "not-running".to_string() }),
+        );
+        while let Some(_) = wait.next().await {}
+        // Container exited — abort stdin to close the attach connection
+        container_exited_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        stdin_handle_clone.abort();
+    });
+
     // Forward container output -> host stdout (main loop, blocks until container exits).
-    // Wrapped in a spawned task so panics are caught (JoinHandle captures panics).
     let ctrlc_flag_for_loop = ctrlc_flag.clone();
     let loop_result = {
         use std::panic::AssertUnwindSafe;
