@@ -1361,12 +1361,17 @@ async fn cmd_extract(name: &SessionName, filter: Option<&str>, dry_run: bool, au
 
     for (vr, host_path, session_branch, _, status) in &changed {
         let short_head = &vr.head.as_str()[..7.min(vr.head.as_str().len())];
-        if *status == "new" {
-            eprintln!("  {} {} → {} (new, container:{})",
-                colored::Colorize::blue("←"), vr.name, session_branch,
-                colored::Colorize::dimmed(short_head));
+        let size_str = if vr.git_size_mb > 0 {
+            format!(" {}MB", vr.git_size_mb)
         } else {
-            // Show commit range: session_head..container_head
+            String::new()
+        };
+        if *status == "new" {
+            eprintln!("  {} {} → {} (new, container:{}{})",
+                colored::Colorize::blue("←"), vr.name, session_branch,
+                colored::Colorize::dimmed(short_head),
+                colored::Colorize::dimmed(size_str.as_str()));
+        } else {
             let session_head = git2::Repository::open(host_path).ok()
                 .and_then(|repo| {
                     repo.find_reference(&format!("refs/heads/{}", session_branch)).ok()
@@ -1374,9 +1379,10 @@ async fn cmd_extract(name: &SessionName, filter: Option<&str>, dry_run: bool, au
                         .map(|c| c.id().to_string())
                 });
             let from = session_head.as_deref().map(|s| &s[..7]).unwrap_or("?");
-            eprintln!("  {} {} → {} ({}..{})",
+            eprintln!("  {} {} → {} ({}..{}{})",
                 colored::Colorize::green("←"), vr.name, session_branch,
-                colored::Colorize::dimmed(from), short_head);
+                colored::Colorize::dimmed(from), short_head,
+                colored::Colorize::dimmed(size_str.as_str()));
         }
     }
 
@@ -1427,27 +1433,48 @@ async fn cmd_extract(name: &SessionName, filter: Option<&str>, dry_run: bool, au
         return Ok(());
     }
 
-    let mut extracted = 0u32;
-    let mut failed = 0u32;
+    // Extract in parallel — repos are independent (different bundles, different host paths)
+    let multi = indicatif::MultiProgress::new();
+    let style = indicatif::ProgressStyle::default_spinner()
+        .template("  {spinner:.blue} {msg}").unwrap()
+        .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏");
+
+    let mut handles = Vec::new();
     for (vr, host_path, session_branch, _, _) in &changed {
-        let spinner = indicatif::ProgressBar::new_spinner();
-        spinner.set_style(indicatif::ProgressStyle::default_spinner()
-            .template("  {spinner:.blue} {msg}").unwrap()
-            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"));
+        let spinner = multi.add(indicatif::ProgressBar::new_spinner());
+        spinner.set_style(style.clone());
         spinner.enable_steady_tick(std::time::Duration::from_millis(80));
         spinner.set_message(format!("Extracting {}...", vr.name));
 
-        match engine.extract(name, &vr.name, host_path, session_branch).await {
-            Ok(result) => {
+        let engine_clone = sync::SyncEngine::new(lc.docker_client().clone());
+        let name_clone = name.clone();
+        let repo_name = vr.name.clone();
+        let host_path = host_path.clone();
+        let session_branch = session_branch.clone();
+
+        handles.push(tokio::spawn(async move {
+            let result = engine_clone.extract(&name_clone, &repo_name, &host_path, &session_branch).await;
+            (repo_name, result, spinner)
+        }));
+    }
+
+    let mut extracted = 0u32;
+    let mut failed = 0u32;
+    for handle in handles {
+        match handle.await {
+            Ok((repo_name, Ok(result), spinner)) => {
                 spinner.finish_and_clear();
-                eprintln!("  {} {} ({} commit(s))", colored::Colorize::green("✓"), vr.name, result.commit_count);
+                multi.println(format!("  {} {} ({} commit(s))",
+                    colored::Colorize::green("✓"), repo_name, result.commit_count)).ok();
                 extracted += 1;
             }
-            Err(e) => {
+            Ok((repo_name, Err(e), spinner)) => {
                 spinner.finish_and_clear();
-                eprintln!("  {} {} — {}", colored::Colorize::red("✗"), vr.name, e);
+                multi.println(format!("  {} {} — {}",
+                    colored::Colorize::red("✗"), repo_name, e)).ok();
                 failed += 1;
             }
+            Err(_) => { failed += 1; }
         }
     }
 
