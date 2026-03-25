@@ -415,13 +415,18 @@ pub async fn launch_reconciliation(
     // two containers writing to the same volume simultaneously
     match lc.inspect_container(&session_ctr).await? {
         crate::types::docker::ContainerState::Running { .. } => {
-            eprintln!("  {} Stopping running session container...", colored::Colorize::yellow("⚠"));
+            let spinner = indicatif::ProgressBar::new_spinner();
+            spinner.set_style(indicatif::ProgressStyle::default_spinner()
+                .template("  {spinner:.yellow} Stopping session container...")
+                .unwrap().tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"));
+            spinner.enable_steady_tick(std::time::Duration::from_millis(80));
             let docker = lc.docker_client();
             docker.stop_container(
                 session_ctr.as_str(),
                 Some(bollard::container::StopContainerOptions { t: 10 }),
             ).await?;
-            eprintln!("  Stopped. Will restart after reconciliation.");
+            spinner.finish_and_clear();
+            eprintln!("  {} Stopped session container.", colored::Colorize::green("✓"));
         }
         _ => {}
     }
@@ -430,11 +435,23 @@ pub async fn launch_reconciliation(
     let _ = lc.remove_container(&reconcile_ctr).await;
 
     // Merge target branch INTO session volume repos — creates real conflict markers
-    eprintln!("  Merging target branch into session repos...");
     let engine = crate::sync::SyncEngine::new(lc.docker_client().clone());
     let mut actual_conflicts: Vec<(String, Vec<String>)> = Vec::new();
     for (repo_name, host_path, _trial_files) in conflict_repos.iter() {
-        match engine.merge_into_volume(session_name, repo_name, host_path, "main").await {
+        let spinner = indicatif::ProgressBar::new_spinner();
+        spinner.set_style(
+            indicatif::ProgressStyle::default_spinner()
+                .template("  {spinner:.blue} Merging into {msg}...")
+                .unwrap()
+                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
+        );
+        spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+        spinner.set_message(repo_name.clone());
+
+        let result = engine.merge_into_volume(session_name, repo_name, host_path, "main").await;
+        spinner.finish_and_clear();
+
+        match result {
             Ok(crate::sync::MergeIntoResult::Conflict { files }) => {
                 eprintln!("    {} {} — conflict in {} file(s)", colored::Colorize::red("✗"), repo_name, files.len());
                 actual_conflicts.push((repo_name.clone(), files));
