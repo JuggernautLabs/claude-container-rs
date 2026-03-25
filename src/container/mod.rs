@@ -185,7 +185,7 @@ fn build_create_args(
     args.env.push(format!("HOST_UID={}", uid));
     args.env.push(format!("HOST_GID={}", gid));
     args.env.push(format!("CLAUDE_SESSION_NAME={}", session_name));
-    args.env.push(format!("TERM={}", std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".into())));
+    args.env.push("TERM=xterm-256color".to_string());
     args.env.push("PLATFORM=linux".to_string());
     args.env.push("RUN_AS_ROOTISH=1".to_string());
 
