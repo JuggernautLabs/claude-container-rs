@@ -408,15 +408,24 @@ impl Lifecycle {
         spinner.set_message("Building image...");
 
         let mut step_count = 0u32;
+        let mut recent_lines: Vec<String> = Vec::new(); // rolling buffer of build output
+        const MAX_RECENT: usize = 30;
 
         while let Some(result) = stream.next().await {
             match result {
                 Ok(info) => {
                     if let Some(ref error) = info.error {
                         spinner.finish_and_clear();
+                        eprintln!("  {} Build failed", "✗");
+                        eprintln!();
+                        // Show recent build output for context
+                        for line in &recent_lines {
+                            eprintln!("    {}", line);
+                        }
+                        eprintln!();
+                        eprintln!("  Error: {}", error);
                         return Err(ContainerError::DockerUnavailable(format!(
-                            "Build failed: {}",
-                            error
+                            "Build failed: {}", error
                         )));
                     }
                     if let Some(ref id) = info.id {
@@ -429,13 +438,30 @@ impl Lifecycle {
                             if line.starts_with("Step ") {
                                 step_count += 1;
                             }
+                            // Keep rolling buffer
+                            recent_lines.push(line.to_string());
+                            if recent_lines.len() > MAX_RECENT {
+                                recent_lines.remove(0);
+                            }
                             spinner.set_message(line.chars().take(72).collect::<String>());
+                        }
+                    }
+                    // Also capture error_detail from the build info
+                    if let Some(ref detail) = info.error_detail {
+                        if let Some(ref msg) = detail.message {
+                            recent_lines.push(format!("ERROR: {}", msg));
                         }
                     }
                 }
                 Err(e) => {
                     spinner.finish_and_clear();
-                    eprintln!("  {} Build failed: {}", "✗", e);
+                    eprintln!("  {} Build failed", "✗");
+                    eprintln!();
+                    for line in &recent_lines {
+                        eprintln!("    {}", line);
+                    }
+                    eprintln!();
+                    eprintln!("  Error: {}", e);
                     return Err(ContainerError::DockerUnavailable(format!("Image build failed: {}", e)));
                 }
             }
