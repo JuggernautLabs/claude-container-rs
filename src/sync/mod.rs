@@ -664,14 +664,10 @@ echo "BUNDLE_OK"
                 Ok(resp) => {
                     exit_code = resp.status_code;
                 }
-                Err(e) => {
-                    // Clean up and propagate
-                    let _ = self.docker.remove_container(
-                        &container_name,
-                        Some(RemoveContainerOptions { force: true, ..Default::default() }),
-                    ).await;
-                    return Err(ContainerError::Docker(e));
+                Err(bollard::errors::Error::DockerContainerWaitError { code, .. }) => {
+                    exit_code = code;
                 }
+                Err(_) => {}
             }
         }
 
