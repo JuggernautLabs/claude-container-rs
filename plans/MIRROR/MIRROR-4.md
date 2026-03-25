@@ -14,8 +14,8 @@ Current `pull` only operates on the session branch. Users want to pull additiona
 ```bash
 git-sandbox pull -s hypno                                    # current: session branch only
 git-sandbox pull -s hypno main                               # current: extract + merge into main
-git-sandbox pull -s hypno --branch develop                   # ALSO mirror develop branch
-git-sandbox pull -s hypno --branch main,develop,feature-x    # mirror these branches
+git-sandbox pull -s hypno --branch "develop"                   # ALSO mirror develop branch
+git-sandbox pull -s hypno --branch "main|develop|feature-.*"      # mirror matching branches
 git-sandbox pull -s hypno --all-branches                     # mirror every branch in container
 git-sandbox pull -s hypno --all-branches --dry-run           # preview what all-branches would do
 ```
