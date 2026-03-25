@@ -435,7 +435,8 @@ impl Lifecycle {
                 }
                 Err(e) => {
                     spinner.finish_and_clear();
-                    return Err(ContainerError::Docker(e));
+                    eprintln!("  {} Build failed: {}", "✗", e);
+                    return Err(ContainerError::DockerUnavailable(format!("Image build failed: {}", e)));
                 }
             }
         }
