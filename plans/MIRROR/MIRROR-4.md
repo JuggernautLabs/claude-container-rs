@@ -1,73 +1,87 @@
-# MIRROR-4: Mirror Pull — Copy Container Branches to Host
+# MIRROR-4: --branch and --all-branches Flags on Pull
 
-blocked_by: [MIRROR-2, MIRROR-3]
-unlocks: []
+blocked_by: [MIRROR-3]
+unlocks: [MIRROR-5]
 
 ## Problem
 
-Current `pull` extracts to a session branch then optionally squash-merges into a target. Branch mirroring is different: for each tracked branch, make the host branch point to the same commit as the container branch. No merge — a direct ref update.
+Current `pull` only operates on the session branch. Users want to pull additional branches from the container — or all of them — with the same preview → confirm → execute flow.
 
 ## Scope
 
-### Behavior
+### CLI — additive flags on existing pull
 
-For each tracked branch in each project repo:
+```bash
+git-sandbox pull -s hypno                                    # current: session branch only
+git-sandbox pull -s hypno main                               # current: extract + merge into main
+git-sandbox pull -s hypno --branch develop                   # ALSO mirror develop branch
+git-sandbox pull -s hypno --branch main,develop,feature-x    # mirror these branches
+git-sandbox pull -s hypno --all-branches                     # mirror every branch in container
+git-sandbox pull -s hypno --all-branches --dry-run           # preview what all-branches would do
+```
 
-| Container | Host | Action |
-|-----------|------|--------|
-| `main` at `abc123` | `main` at `abc123` | Skip (same) |
-| `main` at `def456` | `main` at `abc123` | Update host → `def456` (ff or force) |
-| `feature-x` at `aaa` | no `feature-x` | Create `feature-x` on host |
-| no `feature-x` | `feature-x` at `bbb` | Warn (or delete with `--all`) |
-| `main` rebased | `main` at old SHA | Warn (or force update with `--all`) |
+`--branch` and `--all-branches` are additive to the existing pull. The session branch extract still happens. The branch flags add direct branch mirroring on top.
+
+### Behavior per branch
+
+For each branch specified by `--branch` or `--all-branches`:
+
+| Container | Host | Action | Prompt? |
+|-----------|------|--------|---------|
+| `main` at `abc` | `main` at `abc` | Skip | No |
+| `main` at `def` | `main` at `abc`, ff possible | Fast-forward | No |
+| `main` at `def` | `main` at `abc`, diverged | Force update | Yes |
+| `feature-x` exists | no `feature-x` | Create on host | No |
+| no `feature-x` | `feature-x` exists | Warn, skip | No (unless `--all-branches`) |
+| `main` rebased | old SHA | Force update | Yes |
+
+With `--all-branches`: deletions and force updates happen without individual prompts (one confirmation for the whole operation).
+
+### Preview (always shown, even without --dry-run)
+
+```
+git-sandbox pull -s hypno --all-branches
+──── pull: hypno → host ────
+  ✓ 3 ready, 1 pending merge
+  ...current session branch output...
+
+  branches:
+    hypermemetic/synapse:
+      ✓ main         abc123 → def456 (3 commits, ff)
+      · develop      same
+      + feature-x    new (aaa111, 5 commits)
+      ⚠ hotfix       force update (container rebased)
+    hypermemetic/plexus-core:
+      ✓ main         same
+      - old-feature   deleted in container
+
+  Branch sync: 2 update, 1 create, 1 force, 1 delete
+  Execute? [Y/n]
+```
 
 ### Extraction mechanism
 
-Same as current: git bundle from container → git fetch on host. But instead of creating a session branch, we update the ACTUAL branch:
+Same bundle extraction as current, but for each branch:
 
-```rust
-// Current: creates refs/heads/{session_name}
-repo.reference(&session_ref, new_head_oid, true, "cc: extract")?;
+```bash
+# In throwaway container, bundle specific branch:
+git bundle create /bundles/repo-branch.bundle branch_name
 
-// Mirror: updates refs/heads/{branch_name} directly
-repo.reference(&format!("refs/heads/{}", branch_name), new_head_oid, true, "gs: mirror")?;
+# On host, fetch and update:
+git fetch /path/to/bundle branch_name
+git branch -f branch_name FETCH_HEAD
 ```
 
-### Safety
+For `--all-branches`, bundle everything: `git bundle create /bundles/repo.bundle --all`
 
-**Non-destructive by default:**
-- Fast-forward updates: apply silently
-- Force updates (rebase/rewrite): prompt `Branch 'main' was rewritten in container. Update host? [Y/n]`
-- Deletions: prompt `Branch 'feature-x' deleted in container. Delete on host? [Y/n]`
+### No mode switching
 
-**With `--all`:**
-- All updates applied without prompting
-- Deletions applied without prompting
-- History rewrites applied without prompting
+`pull` does NOT change behavior based on session config. The flags are explicit every time:
+- No `--branch` → current extract behavior
+- `--branch X` → extract + mirror branch X
+- `--all-branches` → extract + mirror all
 
-### Preview
-
-```
-git-sandbox pull -s hypno --dry-run
-──── mirror: hypno → host ────
-  hypermemetic/synapse:
-    ✓ main         abc123 → def456 (3 commits, ff)
-    ✓ develop      same
-    + feature-x    new (aaa111, 5 commits)
-    ✗ old-branch   deleted in container
-
-  hypermemetic/plexus-core:
-    ✓ main         same
-    ⚠ develop      rebased (force update required)
-```
-
-### CLI integration
-
-`pull` detects tracked branches mode:
-- If `tracked_branches` is set → mirror mode
-- If not set → current extract+merge mode (backward compat)
-
-No new command needed — `pull` adapts based on session config.
+`track-branches` (MIRROR-2) becomes optional sugar — it pre-sets the default `--branch` list so you don't have to type it every time.
 
 ## Files to modify
 
