@@ -1452,13 +1452,55 @@ async fn cmd_extract(name: &SessionName, filter: Option<&str>, dry_run: bool, au
 }
 
 async fn cmd_pull(name: &SessionName, branch: &str, filter: Option<&str>, include_deps: bool, dry_run: bool, auto_yes: bool, squash: bool) -> anyhow::Result<()> {
-    let (lc, engine, plan, repo_paths) = build_sync_plan(name, branch, filter, include_deps).await?;
+    // Phase 1: Quick preview (may have "unknown" trial merges for diverged repos)
+    let (lc, engine, initial_plan, repo_paths) = build_sync_plan(name, branch, filter, include_deps).await?;
 
-    // Collect info before consuming plan
-    let has_clean = plan.action.repo_actions.iter()
-        .any(|a| matches!(a.decision, types::SyncDecision::Pull { .. } | types::SyncDecision::CloneToHost));
-    let has_merge_to_target = plan.action.repo_actions.iter()
-        .any(|a| matches!(a.decision, types::SyncDecision::MergeToTarget { .. }));
+    let has_work = initial_plan.action.repo_actions.iter().any(|a| !matches!(a.decision, types::SyncDecision::Skip { .. }));
+    let has_extractable = initial_plan.action.repo_actions.iter()
+        .any(|a| matches!(a.decision, types::SyncDecision::Pull { .. } | types::SyncDecision::CloneToHost | types::SyncDecision::Reconcile { .. }));
+
+    render::sync_plan_directed(&initial_plan.action, "pull");
+
+    if dry_run || !has_work {
+        return Ok(());
+    }
+
+    use std::io::Write;
+
+    // Phase 2: Extract ALL repos first (brings container commits to host).
+    // This is required for accurate trial merges and diverged repo handling.
+    // Without extraction, trial merge says "unknown" for diverged repos.
+    if has_extractable {
+        let session_branch = name.to_string();
+        if confirm("\n  Extract repos to session branch?", auto_yes) {
+            let spinner = indicatif::ProgressBar::new_spinner();
+            spinner.set_style(indicatif::ProgressStyle::default_spinner()
+                .template("  {spinner:.blue} Extracting {msg}...").unwrap()
+                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"));
+            spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+
+            for action in &initial_plan.action.repo_actions {
+                if matches!(action.decision, types::SyncDecision::Skip { .. } | types::SyncDecision::MergeToTarget { .. }) {
+                    continue;
+                }
+                if let Some(host_path) = repo_paths.get(&action.repo_name) {
+                    spinner.set_message(action.repo_name.clone());
+                    let _ = engine.extract(name, &action.repo_name, host_path, &session_branch).await;
+                }
+            }
+            spinner.finish_and_clear();
+            eprintln!("  {} Extracted to session branch '{}'", colored::Colorize::green("✓"), session_branch);
+        } else {
+            eprintln!("  Aborted.");
+            return Ok(());
+        }
+    }
+
+    // Phase 3: Re-plan with accurate data (container commits now on host)
+    // Trial merges will work correctly because commits are locally available.
+    let (_lc2, _engine2, plan, _repo_paths2) = build_sync_plan(name, branch, filter, include_deps).await?;
+
+    // Collect categorized info from the accurate plan
     struct PendingMergeInfo {
         repo_name: String,
         host_path: std::path::PathBuf,
@@ -1495,23 +1537,10 @@ async fn cmd_pull(name: &SessionName, branch: &str, filter: Option<&str>, includ
         })
         .collect();
 
-    render::sync_plan_directed(&plan.action, "pull");
-
-    if dry_run || (!has_clean && diverged_repos.is_empty() && pending_merge_repos.is_empty()) {
-        return Ok(());
-    }
-
-    use std::io::Write;
-
-    // Execute clean pulls (extract + merge)
-    if has_clean {
-        if confirm("\n  Pull new repos?", auto_yes) {
-            eprintln!();
-            let result = engine.execute_sync(name, plan.action, &repo_paths).await?;
-            render::sync_result(&result);
-        } else {
-            eprintln!("  Skipped clean pulls.");
-        }
+    // Show accurate preview (post-extraction)
+    if !pending_merge_repos.is_empty() || !diverged_repos.is_empty() {
+        eprintln!();
+        render::sync_plan_directed(&plan.action, "pull");
     }
 
     // Execute pending merges (session branch → target, no extraction needed)
