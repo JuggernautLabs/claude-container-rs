@@ -724,12 +724,18 @@ done
     pub fn discover_repos(&self, dir: &Path) -> Vec<RepoConfig> {
         let mut repos = Vec::new();
 
+        // Resolve to absolute path — Docker bind mounts require absolute paths
+        let dir = match dir.canonicalize() {
+            Ok(p) => p,
+            Err(_) => dir.to_path_buf(),
+        };
+
         // Use the directory name as prefix (e.g. "hypermemetic" from /path/to/hypermemetic/)
         let prefix = dir.file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        let entries = match std::fs::read_dir(dir) {
+        let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
             Err(_) => return repos,
         };
