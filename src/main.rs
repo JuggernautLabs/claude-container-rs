@@ -183,6 +183,27 @@ enum SessionAction {
         /// Replay logs when attaching
         #[arg(short, long)]
         logs: bool,
+        /// Dockerfile or directory containing one
+        #[arg(long)]
+        dockerfile: Option<PathBuf>,
+        /// Discover repos in directory
+        #[arg(long)]
+        discover_repos: Option<PathBuf>,
+        /// Continue previous Claude conversation
+        #[arg(long, short)]
+        r#continue: bool,
+        /// Enable Docker-in-Docker
+        #[arg(long)]
+        docker: bool,
+        /// Run as root (no privilege drop)
+        #[arg(long)]
+        as_root: bool,
+        /// Clone from this branch instead of each repo's current branch
+        #[arg(long)]
+        from_branch: Option<String>,
+        /// Initial prompt for Claude
+        #[arg(long)]
+        prompt: Option<String>,
     },
     /// Stop a running container
     Stop,
@@ -254,8 +275,8 @@ async fn main() -> anyhow::Result<()> {
                 SessionAction::Exec { root, command } => {
                     cmd_session_exec(&name, root, &command).await?;
                 }
-                SessionAction::Start { attach, logs } => {
-                    cmd_start(&name, attach, logs, auto_yes, None, None, false, false, false, None, None).await?;
+                SessionAction::Start { attach, logs, dockerfile, discover_repos, r#continue, docker, as_root, from_branch, prompt } => {
+                    cmd_start(&name, attach, logs, auto_yes, dockerfile, discover_repos, r#continue, docker, as_root, from_branch, prompt).await?;
                 }
                 SessionAction::Stop => {
                     cmd_session_stop(&name, auto_yes).await?;
