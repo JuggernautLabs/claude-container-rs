@@ -1430,12 +1430,21 @@ async fn cmd_extract(name: &SessionName, filter: Option<&str>, dry_run: bool, au
     let mut extracted = 0u32;
     let mut failed = 0u32;
     for (vr, host_path, session_branch, _, _) in &changed {
+        let spinner = indicatif::ProgressBar::new_spinner();
+        spinner.set_style(indicatif::ProgressStyle::default_spinner()
+            .template("  {spinner:.blue} {msg}").unwrap()
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"));
+        spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+        spinner.set_message(format!("Extracting {}...", vr.name));
+
         match engine.extract(name, &vr.name, host_path, session_branch).await {
             Ok(result) => {
+                spinner.finish_and_clear();
                 eprintln!("  {} {} ({} commit(s))", colored::Colorize::green("✓"), vr.name, result.commit_count);
                 extracted += 1;
             }
             Err(e) => {
+                spinner.finish_and_clear();
                 eprintln!("  {} {} — {}", colored::Colorize::red("✗"), vr.name, e);
                 failed += 1;
             }
