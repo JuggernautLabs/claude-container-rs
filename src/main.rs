@@ -990,16 +990,12 @@ async fn cmd_session_cleanup(name: &SessionName, auto_yes: bool) -> anyhow::Resu
     ).await;
 
     let script = "rm -f /session/.reconcile-complete /session/.merge-into-summary /session/.merge-into-branch /session/.sync-summary /session/.sync-branch 2>/dev/null; echo CLEANED";
-    let config = bollard::container::Config {
-        image: Some("alpine/git".to_string()),
-        entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
-        cmd: Some(vec![script.to_string()]),
-        host_config: Some(bollard::models::HostConfig {
-            binds: Some(vec![format!("{}:/session", volume)]),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    use types::docker::{throwaway_config, VolumeMount, RunAs};
+    let config = throwaway_config(
+        "alpine/git", script,
+        &[VolumeMount::Writable { source: volume.to_string(), target: "/session".into() }],
+        &RunAs::developer(), name,
+    );
 
     lc.docker_client().create_container(
         Some(bollard::container::CreateContainerOptions { name: container_name.as_str(), platform: None }),
@@ -1038,10 +1034,9 @@ async fn cmd_session_verify(name: &SessionName) -> anyhow::Result<()> {
         (name.pip_volume(), "/home/developer/.cache/pip"),
     ];
 
-    let mut binds = Vec::new();
-    for (vol, mount) in &volumes {
-        binds.push(format!("{}:{}:ro", vol, mount));
-    }
+    let mounts: Vec<types::docker::VolumeMount> = volumes.iter()
+        .map(|(vol, mount)| types::docker::VolumeMount::ReadOnly { source: vol.to_string(), target: mount.to_string() })
+        .collect();
 
     // Script: for each mount, count files not owned by HOST_UID
     let script = format!(
@@ -1067,16 +1062,9 @@ done
         Some(bollard::container::RemoveContainerOptions { force: true, ..Default::default() }),
     ).await;
 
-    let config = bollard::container::Config {
-        image: Some("alpine/git".to_string()),
-        entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
-        cmd: Some(vec![script]),
-        host_config: Some(bollard::models::HostConfig {
-            binds: Some(binds),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let config = types::docker::throwaway_config(
+        "alpine/git", &script, &mounts, &types::docker::RunAs::developer(), name,
+    );
 
     docker.create_container(
         Some(bollard::container::CreateContainerOptions { name: container_name.as_str(), platform: None }),
@@ -1153,10 +1141,9 @@ async fn cmd_session_fix(name: &SessionName, auto_yes: bool) -> anyhow::Result<(
         (name.pip_volume(), "/home/developer/.cache/pip"),
     ];
 
-    let mut binds = Vec::new();
-    for (vol, mount) in &volumes {
-        binds.push(format!("{}:{}", vol, mount));
-    }
+    let mounts: Vec<types::docker::VolumeMount> = volumes.iter()
+        .map(|(vol, mount)| types::docker::VolumeMount::Writable { source: vol.to_string(), target: mount.to_string() })
+        .collect();
 
     let script = format!(
         "chown -R {}:{} /workspace /home/developer/.claude /home/developer/.cargo /home/developer/.npm /home/developer/.cache/pip 2>/dev/null; echo FIXED",
@@ -1169,17 +1156,10 @@ async fn cmd_session_fix(name: &SessionName, auto_yes: bool) -> anyhow::Result<(
         Some(bollard::container::RemoveContainerOptions { force: true, ..Default::default() }),
     ).await;
 
-    let config = bollard::container::Config {
-        image: Some("alpine/git".to_string()),
-        user: Some("0:0".to_string()), // run as root to chown
-        entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
-        cmd: Some(vec![script]),
-        host_config: Some(bollard::models::HostConfig {
-            binds: Some(binds),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    // Fix runs as root intentionally — it's fixing ownership
+    let config = types::docker::throwaway_config(
+        "alpine/git", &script, &mounts, &types::docker::RunAs::Root, name,
+    );
 
     docker.create_container(
         Some(bollard::container::CreateContainerOptions { name: container_name.as_str(), platform: None }),
@@ -1253,16 +1233,11 @@ async fn cmd_session_set_dir(name: &SessionName, target: Option<&str>) -> anyhow
                 Some(bollard::container::RemoveContainerOptions { force: true, ..Default::default() }),
             ).await;
 
-            let config = bollard::container::Config {
-                image: Some("alpine/git".to_string()),
-                entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
-                cmd: Some(vec!["rm -f /session/.main-project".to_string()]),
-                host_config: Some(bollard::models::HostConfig {
-                    binds: Some(vec![format!("{}:/session", volume)]),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            };
+            let config = types::docker::throwaway_config(
+                "alpine/git", "rm -f /session/.main-project",
+                &[types::docker::VolumeMount::Writable { source: volume.to_string(), target: "/session".into() }],
+                &types::docker::RunAs::developer(), name,
+            );
 
             lc.docker_client().create_container(
                 Some(bollard::container::CreateContainerOptions { name: container_name.as_str(), platform: None }),

@@ -500,21 +500,14 @@ impl SessionManager {
         // Write via base64-encoded pipe — safe for any YAML content
         let script = crate::shell_safety::write_config_script(&yaml);
 
-        let mut wcfg_labels = std::collections::HashMap::new();
-        wcfg_labels.insert(crate::types::THROWAWAY_LABEL.to_string(), "true".to_string());
-        wcfg_labels.insert(crate::types::SESSION_LABEL.to_string(), name.to_string());
-
-        let cfg = bollard::container::Config {
-            image: Some("alpine:latest".to_string()),
-            entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
-            cmd: Some(vec![script]),
-            labels: Some(wcfg_labels),
-            host_config: Some(bollard::models::HostConfig {
-                binds: Some(vec![format!("{}:/session", volume_name)]),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
+        use crate::types::docker::{throwaway_config, VolumeMount, RunAs};
+        let cfg = throwaway_config(
+            "alpine:latest",
+            &script,
+            &[VolumeMount::Writable { source: volume_name.to_string(), target: "/session".into() }],
+            &RunAs::developer(),
+            name,
+        );
 
         self.docker.create_container(
             Some(bollard::container::CreateContainerOptions { name: container_label.as_str(), platform: None }),

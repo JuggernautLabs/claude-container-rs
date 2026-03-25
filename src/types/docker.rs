@@ -1,7 +1,8 @@
 //! Docker subsystem state — images, containers, mounts, runtime
 
 use std::path::PathBuf;
-use super::{ContainerName, ImageRef, ImageId, VolumeName};
+use std::collections::HashMap;
+use super::{ContainerName, ImageRef, ImageId, VolumeName, SessionName, THROWAWAY_LABEL, SESSION_LABEL};
 
 // ============================================================================
 // Docker daemon
@@ -153,4 +154,84 @@ pub enum TokenMount {
     EnvVar {
         var_name: String,
     },
+}
+
+// ============================================================================
+// Volume safety — type-level enforcement of file ownership
+// ============================================================================
+
+/// Who a throwaway container runs as.
+/// Required by `ThrowawayConfig` — you can't create a writable container without specifying this.
+#[derive(Debug, Clone)]
+pub enum RunAs {
+    /// The host developer user — files will be accessible in the main container.
+    Developer(u32, u32),
+    /// Root — only for intentional admin operations (session fix).
+    Root,
+}
+
+impl RunAs {
+    /// Get the host developer's uid:gid.
+    pub fn developer() -> Self {
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+        Self::Developer(uid, gid)
+    }
+
+    pub fn docker_user(&self) -> String {
+        match self {
+            Self::Developer(uid, gid) => format!("{}:{}", uid, gid),
+            Self::Root => "0:0".to_string(),
+        }
+    }
+}
+
+/// A volume mount with access control.
+#[derive(Debug, Clone)]
+pub enum VolumeMount {
+    /// Read-only — container can't modify files.
+    ReadOnly { source: String, target: String },
+    /// Writable — container will create/modify files.
+    Writable { source: String, target: String },
+}
+
+impl VolumeMount {
+    pub fn to_bind(&self) -> String {
+        match self {
+            Self::ReadOnly { source, target } => format!("{}:{}:ro", source, target),
+            Self::Writable { source, target } => format!("{}:{}", source, target),
+        }
+    }
+}
+
+/// Build a throwaway container config with volume safety.
+/// All throwaway containers MUST use this builder — it enforces:
+/// - `RunAs` determines the user (developer or root)
+/// - Throwaway label for gc cleanup
+/// - Session label for scoped cleanup
+pub fn throwaway_config(
+    image: &str,
+    script: &str,
+    mounts: &[VolumeMount],
+    run_as: &RunAs,
+    session: &SessionName,
+) -> bollard::container::Config<String> {
+    let binds: Vec<String> = mounts.iter().map(|m| m.to_bind()).collect();
+
+    let mut labels = HashMap::new();
+    labels.insert(THROWAWAY_LABEL.to_string(), "true".to_string());
+    labels.insert(SESSION_LABEL.to_string(), session.to_string());
+
+    bollard::container::Config {
+        image: Some(image.to_string()),
+        user: Some(run_as.docker_user()),
+        entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
+        cmd: Some(vec![script.to_string()]),
+        labels: Some(labels),
+        host_config: Some(bollard::models::HostConfig {
+            binds: if binds.is_empty() { None } else { Some(binds) },
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
 }

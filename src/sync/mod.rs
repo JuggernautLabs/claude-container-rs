@@ -1239,19 +1239,17 @@ git remote remove _cc_upstream 2>/dev/null
             branch = branch,
         );
 
-        let config = ContainerConfig {
-            image: Some(GIT_UTIL_IMAGE.to_string()),
-            entrypoint: Some(vec!["sh".to_string(), "-c".to_string()]),
-            cmd: Some(vec![script]),
-            host_config: Some(bollard::models::HostConfig {
-                binds: Some(vec![
-                    format!("{}:/session", volume_name),
-                    format!("{}:/upstream:ro", host_path_str),
-                ]),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
+        use crate::types::docker::{throwaway_config, VolumeMount, RunAs};
+        let config = throwaway_config(
+            GIT_UTIL_IMAGE,
+            &script,
+            &[
+                VolumeMount::Writable { source: volume_name.to_string(), target: "/session".into() },
+                VolumeMount::ReadOnly { source: host_path_str, target: "/upstream".into() },
+            ],
+            &RunAs::developer(),
+            session,
+        );
 
         let opts = CreateContainerOptions {
             name: &container_name,
