@@ -477,6 +477,190 @@ impl SessionManager {
         Ok(Some(config))
     }
 
+    /// Read config from volume, or auto-discover repos if missing.
+    ///
+    /// 1. Tries `read_config` — if present, returns it.
+    /// 2. If None, scans the session volume for directories containing `.git`.
+    /// 3. For each discovered repo, tries to infer the host path from cwd or sibling dirs.
+    /// 4. Builds a SessionConfig, writes it to the volume, and returns it.
+    pub async fn read_or_discover_config(
+        &self,
+        name: &SessionName,
+    ) -> Result<SessionConfig, crate::types::ContainerError> {
+        use colored::Colorize;
+
+        // 1. Try existing config
+        if let Some(config) = self.read_config(name).await? {
+            return Ok(config);
+        }
+
+        // 2. No config — scan the volume for git repos
+        eprintln!(
+            "  {} No .claude-projects.yml found — scanning volume for repos...",
+            "⚠".yellow()
+        );
+
+        let volume_name = name.session_volume();
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() % 0xFFFFFF;
+        let container_label = format!("cc-discover-{}-{:x}", name.as_str(), suffix);
+
+        let _ = self
+            .docker
+            .remove_container(
+                &container_label,
+                Some(bollard::container::RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                }),
+            )
+            .await;
+
+        // Find directories with .git inside the volume (1 and 2 levels deep)
+        let script = r#"
+for d in /session/*/; do
+    [ -d "${d}.git" ] && echo "REPO:$(basename "$d")"
+done
+for d in /session/*/*/; do
+    [ -d "${d}.git" ] && echo "REPO:$(basename "$(dirname "$d")")/$(basename "$d")"
+done
+"#;
+
+        use crate::types::docker::{throwaway_config, VolumeMount, RunAs};
+        let cfg = throwaway_config(
+            "alpine/git",
+            script,
+            &[VolumeMount::ReadOnly {
+                source: volume_name.to_string(),
+                target: "/session".into(),
+            }],
+            &RunAs::developer(),
+            name,
+        );
+
+        let created = self
+            .docker
+            .create_container(
+                Some(bollard::container::CreateContainerOptions {
+                    name: container_label.as_str(),
+                    platform: None,
+                }),
+                cfg,
+            )
+            .await?;
+
+        self.docker
+            .start_container::<String>(&created.id, None)
+            .await?;
+
+        let mut wait_stream = self.docker.wait_container(
+            &created.id,
+            Some(bollard::container::WaitContainerOptions {
+                condition: "not-running",
+            }),
+        );
+        while let Some(_) = wait_stream.next().await {}
+
+        let mut log_stream = self.docker.logs::<String>(
+            &created.id,
+            Some(bollard::container::LogsOptions {
+                stdout: true,
+                stderr: false,
+                follow: false,
+                ..Default::default()
+            }),
+        );
+
+        let mut output = String::new();
+        while let Some(chunk) = log_stream.next().await {
+            if let Ok(log) = chunk {
+                output.push_str(&log.to_string());
+            }
+        }
+
+        let _ = self
+            .docker
+            .remove_container(
+                &created.id,
+                Some(bollard::container::RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                }),
+            )
+            .await;
+
+        // 3. Parse discovered repo names and try to infer host paths
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let mut projects = std::collections::BTreeMap::new();
+
+        for line in output.lines() {
+            let line = line.trim();
+            if let Some(repo_name) = line.strip_prefix("REPO:") {
+                let repo_name = repo_name.trim();
+                if repo_name.is_empty() {
+                    continue;
+                }
+
+                // Try to find host path:
+                //   a) cwd/<repo_leaf>
+                //   b) cwd/../<repo_leaf>
+                //   c) fall back to a placeholder
+                let leaf = repo_name.rsplit('/').next().unwrap_or(repo_name);
+                let candidate_a = cwd.join(leaf);
+                let candidate_b = cwd.parent().map(|p| p.join(leaf));
+
+                let host_path = if candidate_a.join(".git").is_dir() {
+                    candidate_a
+                } else if candidate_b
+                    .as_ref()
+                    .map_or(false, |p| p.join(".git").is_dir())
+                {
+                    candidate_b.unwrap()
+                } else {
+                    // Can't find on host — use a placeholder so the config is at least usable
+                    PathBuf::from(format!("/unknown/{}", repo_name))
+                };
+
+                eprintln!(
+                    "    {} {} → {}",
+                    "·".blue(),
+                    repo_name,
+                    host_path.display()
+                );
+
+                projects.insert(
+                    repo_name.to_string(),
+                    crate::types::ProjectConfig {
+                        path: host_path,
+                        main: false,
+                        role: Default::default(),
+                    },
+                );
+            }
+        }
+
+        if projects.is_empty() {
+            return Err(crate::types::ContainerError::SessionNotFound(name.clone()));
+        }
+
+        let config = SessionConfig {
+            version: Some("1".to_string()),
+            projects,
+        };
+
+        // 4. Write the discovered config back into the volume
+        self.write_config(name, &config).await?;
+        eprintln!(
+            "  {} Auto-discovered {} repo(s), config written.",
+            "✓".green(),
+            config.projects.len()
+        );
+
+        Ok(config)
+    }
+
     /// Write session config (.claude-projects.yml) into the session volume.
     pub async fn write_config(
         &self,

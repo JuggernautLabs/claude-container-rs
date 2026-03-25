@@ -480,6 +480,7 @@ async fn cmd_start(
         use std::io::Write;
         std::io::stderr().flush().ok();
         container::attach_to_running(&lc, &name.container_name(), replay_logs).await?;
+        eprintln!("  To reattach: git-sandbox session -s {} start -a", name);
         return Ok(());
     }
 
@@ -1184,8 +1185,7 @@ async fn cmd_session_set_role(name: &SessionName, repo_pattern: &str, role: CliR
     let lc = lifecycle::Lifecycle::new()?;
     let sm = session::SessionManager::new(lc.docker_client().clone());
 
-    let mut config = sm.read_config(name).await?
-        .ok_or_else(|| anyhow::anyhow!("No config in session '{}'", name))?;
+    let mut config = sm.read_or_discover_config(name).await?;
 
     let target_role = match role {
         CliRepoRole::Project => types::config::RepoRole::Project,
@@ -1272,8 +1272,7 @@ async fn cmd_extract(name: &SessionName, filter: Option<&str>, dry_run: bool, au
     let lc = lifecycle::Lifecycle::new()?;
     let sm = session::SessionManager::new(lc.docker_client().clone());
 
-    let config = sm.read_config(name).await?
-        .ok_or_else(|| anyhow::anyhow!("No config in session '{}'", name))?;
+    let config = sm.read_or_discover_config(name).await?;
 
     let engine = sync::SyncEngine::new(lc.docker_client().clone());
 
@@ -1776,8 +1775,7 @@ async fn build_sync_plan(
     let lc = lifecycle::Lifecycle::new()?;
     let sm = session::SessionManager::new(lc.docker_client().clone());
 
-    let config = sm.read_config(name).await?
-        .ok_or_else(|| anyhow::anyhow!("No config in session '{}'", name))?;
+    let config = sm.read_or_discover_config(name).await?;
 
     let mut repo_paths: std::collections::BTreeMap<String, std::path::PathBuf> = config.projects.iter()
         .filter(|(_, pcfg)| include_deps || pcfg.role == types::config::RepoRole::Project)

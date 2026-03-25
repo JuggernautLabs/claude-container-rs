@@ -630,6 +630,10 @@ async fn attach_container(
     // Enable raw mode so keystrokes go straight to the container
     let _raw_guard = RawModeGuard::enable()?;
 
+    // Clone container name for closures that capture by move
+    let ctr_name_for_stdin = container_name.to_string();
+    let ctr_name_for_ctrlc = container_name.to_string();
+
     // Spawn a task to forward host stdin -> container stdin
     // Detect Ctrl-C (0x03) in raw mode and exit
     let ctrlc_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -653,7 +657,7 @@ async fn attach_container(
                         if count >= 1 {
                             // Second Ctrl-C: force exit
                             restore_terminal();
-                            eprintln!("\r\n→ Detached.");
+                            eprintln!("\r\n→ Detached from {}.", ctr_name_for_stdin);
                             std::process::exit(0);
                         }
                         // First Ctrl-C: forward to container (Claude handles it)
@@ -714,7 +718,7 @@ async fn attach_container(
         ctrlc_flag_clone.store(true, std::sync::atomic::Ordering::SeqCst);
         // Restore terminal fully via consolidated function
         restore_terminal();
-        eprintln!("\r\n→ Detached from container.");
+        eprintln!("\r\n→ Detached from {}.", ctr_name_for_ctrlc);
         std::process::exit(0);
     });
 
@@ -756,7 +760,7 @@ async fn attach_container(
 
     // Print appropriate exit message based on how we exited
     if eof_flag.load(std::sync::atomic::Ordering::SeqCst) {
-        eprintln!("\r\n→ Connection lost.");
+        eprintln!("\r\n→ Connection lost (container: {}).", container_name);
     }
 
     // If the output loop panicked, report it but don't re-panic
