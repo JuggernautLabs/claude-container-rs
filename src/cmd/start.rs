@@ -57,6 +57,7 @@ pub(crate) async fn cmd_start(
     replay_logs: bool,
     auto_yes: bool,
     dockerfile: Option<PathBuf>,
+    cli_image: Option<String>,
     discover_repos: Option<PathBuf>,
     continue_session: bool,
     enable_docker: bool,
@@ -92,9 +93,14 @@ pub(crate) async fn cmd_start(
         create_new_session(&lc, &sm, name, repos, dockerfile, enable_docker, as_root).await?;
     }
 
-    // Resolve image, verify, and launch
-    let effective_dockerfile = launch_path.resolve_dockerfile(&dockerfile);
-    let image = resolve_image(&lc, name, &effective_dockerfile).await?;
+    // Resolve image: --image wins, then --dockerfile, then stored/default
+    let image = if let Some(ref img) = cli_image {
+        eprintln!("  image: {} {}", img.as_str().blue(), "(pre-built)".dimmed());
+        ImageRef::new(img)
+    } else {
+        let effective_dockerfile = launch_path.resolve_dockerfile(&dockerfile);
+        resolve_image(&lc, name, &effective_dockerfile).await?
+    };
     let launch_opts = container::LaunchOptions { continue_session, initial_prompt };
     verify_and_launch(&lc, name, &image, auto_yes, &launch_opts).await
 }

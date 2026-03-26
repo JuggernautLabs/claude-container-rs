@@ -651,34 +651,35 @@ async fn attach_container(
     let ctr_name_for_stdin = container_name.to_string();
     let ctr_name_for_ctrlc = container_name.to_string();
 
-    // Spawn a task to forward host stdin -> container stdin
-    // Detect Ctrl-C (0x03) in raw mode and exit
-    let ctrlc_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-    let ctrlc_count_clone = ctrlc_count.clone();
+    // Spawn a task to forward host stdin -> container stdin.
+    // All input (including Ctrl-C / 0x03) is forwarded directly to the container.
+    // The interactive session owns Ctrl-C — we only exit when the container exits.
+    // Ctrl-Z (0x1a) detaches from the container without stopping it.
     let eof_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let eof_flag_clone = eof_flag.clone();
+    let detach_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let detach_flag_clone = detach_flag.clone();
     let stdin_handle = tokio::spawn(async move {
         let mut stdin = tokio::io::stdin();
         let mut buf = [0u8; 4096];
         loop {
             match stdin.read(&mut buf).await {
                 Ok(0) => {
-                    // EOF / broken pipe — distinct from Ctrl-C
+                    // EOF / broken pipe
                     eof_flag_clone.store(true, std::sync::atomic::Ordering::SeqCst);
                     break;
                 }
                 Ok(n) => {
-                    // Check for Ctrl-C (0x03) — in raw mode it comes as a byte, not SIGINT
-                    if buf[..n].contains(&0x03) {
-                        let count = ctrlc_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        if count >= 1 {
-                            // Second Ctrl-C: force exit
-                            restore_terminal();
-                            eprintln!("\r\n→ Detached from {}.", ctr_name_for_stdin);
-                            std::process::exit(0);
-                        }
-                        // First Ctrl-C: forward to container (Claude handles it)
+                    // Ctrl-Z (0x1a): detach from container (leave it running)
+                    if buf[..n].contains(&0x1a) {
+                        detach_flag_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                        restore_terminal();
+                        eprintln!("\r\n→ Detached from {} (still running). Resume with: git-sandbox session -s <name> start -a",
+                            ctr_name_for_stdin);
+                        break;
                     }
+                    // Forward everything else to the container — including Ctrl-C (0x03).
+                    // Claude Code and other interactive programs handle their own signals.
                     if input.write_all(&buf[..n]).await.is_err() {
                         break;
                     }
@@ -728,15 +729,16 @@ async fn attach_container(
         }
     });
 
-    // Set up Ctrl-C handler that restores terminal before exiting
+    // During an interactive session, SIGINT should be a no-op on the host side.
+    // In raw mode, Ctrl-C arrives as byte 0x03 via stdin (forwarded to the container).
+    // SIGINT only fires if raw mode setup is incomplete or on some edge cases —
+    // either way, we do NOT want to kill the host process while attached.
+    let _ = ctr_name_for_ctrlc; // no longer used in handler
     let ctrlc_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let ctrlc_flag_clone = ctrlc_flag.clone();
     let _ = ctrlc::set_handler(move || {
+        // Just set the flag — don't exit. The container owns the session.
         ctrlc_flag_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-        // Restore terminal fully via consolidated function
-        restore_terminal();
-        eprintln!("\r\n→ Detached from {}.", ctr_name_for_ctrlc);
-        std::process::exit(0);
     });
 
     // Spawn a container wait task — when the container exits, abort stdin
@@ -758,15 +760,13 @@ async fn attach_container(
     });
 
     // Forward container output -> host stdout (main loop, blocks until container exits).
-    let ctrlc_flag_for_loop = ctrlc_flag.clone();
+    // We do NOT check ctrlc_flag here — the container owns the session and we keep
+    // forwarding output until it actually exits or the stream closes.
     let loop_result = {
         use std::panic::AssertUnwindSafe;
         let handle = tokio::spawn(AssertUnwindSafe(async move {
             let mut stdout = tokio::io::stdout();
             while let Some(result) = output.next().await {
-                if ctrlc_flag_for_loop.load(std::sync::atomic::Ordering::SeqCst) {
-                    break;
-                }
                 match result {
                     Ok(log) => {
                         let bytes = log.into_bytes();
@@ -793,7 +793,9 @@ async fn attach_container(
     restore_terminal();
 
     // Print appropriate exit message based on how we exited
-    if eof_flag.load(std::sync::atomic::Ordering::SeqCst) {
+    if detach_flag.load(std::sync::atomic::Ordering::SeqCst) {
+        // Already printed detach message in stdin task
+    } else if eof_flag.load(std::sync::atomic::Ordering::SeqCst) {
         eprintln!("\r\n→ Connection lost (container: {}).", container_name);
     }
 

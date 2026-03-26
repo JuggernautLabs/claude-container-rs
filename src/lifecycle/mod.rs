@@ -461,8 +461,21 @@ impl Lifecycle {
                         eprintln!("    {}", line);
                     }
                     eprintln!();
-                    eprintln!("  Error: {}", e);
-                    return Err(ContainerError::DockerUnavailable(format!("Image build failed: {}", e)));
+                    // Extract useful info from the bollard error
+                    let err_str = format!("{:?}", e); // Debug format has more info
+                    let display_str = format!("{}", e);
+                    if display_str.contains("stream error") || display_str.contains("Docker responded with") {
+                        eprintln!("  Error: build failed at the step above.");
+                        eprintln!("  To debug, build manually:");
+                        eprintln!("    docker build -t {} -f {} {}",
+                            name.as_str(),
+                            dockerfile.display(),
+                            context.display(),
+                        );
+                    } else {
+                        eprintln!("  Error: {}", display_str);
+                    }
+                    return Err(ContainerError::DockerUnavailable(format!("Image build failed: {}", display_str)));
                 }
             }
         }

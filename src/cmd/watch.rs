@@ -46,16 +46,44 @@ pub(crate) async fn cmd_watch(
 
     let start = std::time::Instant::now();
     let mut cmd_child: Option<std::process::Child> = None;
+    let mut pending_run = false; // a change came in while the command was still running
 
     watcher.run(|events, summary| {
+        // Check if previous command finished
+        if let Some(ref mut child) = cmd_child {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() {
+                        eprintln!("  {} command exited with {}", "✗".red(), status);
+                    }
+                    cmd_child = None;
+                }
+                Ok(None) => {
+                    // Still running — don't kill it
+                }
+                Err(_) => {
+                    cmd_child = None;
+                }
+            }
+        }
+
+        let mut needs_run = false;
         for event in events {
             eprintln!("{}", watch::format_event(event, start));
-
             if !command.is_empty() && event.source == watch::ChangeSource::Container {
-                if let Some(ref mut child) = cmd_child {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                needs_run = true;
+            }
+        }
+
+        if needs_run {
+            if cmd_child.is_some() {
+                // Command still running — queue for next poll
+                if !pending_run {
+                    eprintln!("  {} command still running, will re-run when it finishes", "…".dimmed());
+                    pending_run = true;
                 }
+            } else {
+                pending_run = false;
                 let child = std::process::Command::new(&command[0])
                     .args(&command[1..])
                     .spawn();
@@ -64,10 +92,16 @@ pub(crate) async fn cmd_watch(
                     Err(e) => { eprintln!("  {} command failed: {}", "✗".red(), e); }
                 }
             }
-        }
-
-        if events.is_empty() {
-            // Periodic — just update the summary
+        } else if pending_run && cmd_child.is_none() {
+            // Previous command finished and we have queued changes — run now
+            pending_run = false;
+            let child = std::process::Command::new(&command[0])
+                .args(&command[1..])
+                .spawn();
+            match child {
+                Ok(c) => { cmd_child = Some(c); }
+                Err(e) => { eprintln!("  {} command failed: {}", "✗".red(), e); }
+            }
         }
     }).await;
 

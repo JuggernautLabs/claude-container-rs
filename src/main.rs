@@ -41,6 +41,9 @@ enum Commands {
         /// Dockerfile or directory containing one
         #[arg(long)]
         dockerfile: Option<PathBuf>,
+        /// Use a pre-built image (skip Dockerfile build)
+        #[arg(long, conflicts_with = "dockerfile")]
+        image: Option<String>,
         /// Discover repos in directory
         #[arg(long)]
         discover_repos: Option<PathBuf>,
@@ -190,6 +193,9 @@ enum SessionAction {
         /// Dockerfile or directory containing one
         #[arg(long)]
         dockerfile: Option<PathBuf>,
+        /// Use a pre-built image (skip Dockerfile build)
+        #[arg(long, conflicts_with = "dockerfile")]
+        image: Option<String>,
         /// Discover repos in directory
         #[arg(long)]
         discover_repos: Option<PathBuf>,
@@ -268,9 +274,9 @@ async fn main() -> anyhow::Result<()> {
             let name = SessionName::new(&session);
             cmd_run(&name, &prompt, dockerfile).await?;
         }
-        Commands::Start { session, attach, logs, dockerfile, discover_repos, r#continue, docker, as_root, from_branch, prompt } => {
+        Commands::Start { session, attach, logs, dockerfile, image, discover_repos, r#continue, docker, as_root, from_branch, prompt } => {
             let name = SessionName::new(&session);
-            cmd_start(&name, attach, logs, auto_yes, dockerfile, discover_repos, r#continue, docker, as_root, from_branch, prompt).await?;
+            cmd_start(&name, attach, logs, auto_yes, dockerfile, image, discover_repos, r#continue, docker, as_root, from_branch, prompt).await?;
         }
         Commands::Session { session, filter, action } => {
             let name = SessionName::new(&session);
@@ -286,8 +292,8 @@ async fn main() -> anyhow::Result<()> {
                 SessionAction::Exec { root, command } => {
                     cmd_session_exec(&name, root, &command).await?;
                 }
-                SessionAction::Start { attach, logs, dockerfile, discover_repos, r#continue, docker, as_root, from_branch, prompt } => {
-                    cmd_start(&name, attach, logs, auto_yes, dockerfile, discover_repos, r#continue, docker, as_root, from_branch, prompt).await?;
+                SessionAction::Start { attach, logs, dockerfile, image, discover_repos, r#continue, docker, as_root, from_branch, prompt } => {
+                    cmd_start(&name, attach, logs, auto_yes, dockerfile, image, discover_repos, r#continue, docker, as_root, from_branch, prompt).await?;
                 }
                 SessionAction::Stop => {
                     cmd_session_stop(&name, auto_yes).await?;

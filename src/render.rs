@@ -444,6 +444,12 @@ pub fn sync_result(result: &crate::types::SyncResult) {
                     "✓".green(), repo_name, extract.commit_count, merge
                 );
             }
+            RepoSyncResult::Merged { repo_name, merge } => {
+                println!(
+                    "  {} {} — {}",
+                    "✓".green(), repo_name, merge
+                );
+            }
             RepoSyncResult::Pushed { repo_name } => {
                 println!("  {} {} — pushed", "✓".green(), repo_name);
             }

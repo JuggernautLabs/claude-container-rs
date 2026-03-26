@@ -180,6 +180,11 @@ pub enum RepoSyncResult {
     Pushed {
         repo_name: String,
     },
+    /// Session branch already had the work, just merged to target (no extraction)
+    Merged {
+        repo_name: String,
+        merge: super::git::MergeOutcome,
+    },
     /// Successfully cloned to host
     ClonedToHost {
         repo_name: String,
@@ -213,6 +218,7 @@ impl SyncResult {
     pub fn succeeded(&self) -> usize {
         self.results.iter().filter(|r| matches!(r,
             RepoSyncResult::Pulled { .. } |
+            RepoSyncResult::Merged { .. } |
             RepoSyncResult::Pushed { .. } |
             RepoSyncResult::ClonedToHost { .. }
         )).count()

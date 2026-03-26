@@ -868,11 +868,10 @@ echo "BUNDLE_OK"
                     if repo.graph_descendant_of(session_oid, base_oid).unwrap_or(false) {
                         Some(base_oid)
                     } else {
-                        // Stale squash-base: warn and fall back to merge-base
+                        // Stale squash-base (session was likely rebased in container)
                         eprintln!(
-                            "  warning: squash-base {} for {} is stale (not ancestor of session HEAD), falling back to merge-base",
+                            "  note: squash-base {} reset (session rebased), using merge-base",
                             &c.id().to_string()[..7.min(c.id().to_string().len())],
-                            session_branch,
                         );
                         None
                     }
@@ -1607,9 +1606,8 @@ fi
                                     files: files.clone(),
                                 }
                             } else {
-                                RepoSyncResult::Pulled {
+                                RepoSyncResult::Merged {
                                     repo_name: action.repo_name.clone(),
-                                    extract: ExtractResult { commit_count: 0, new_head: CommitHash::new("".to_string()) },
                                     merge,
                                 }
                             }
