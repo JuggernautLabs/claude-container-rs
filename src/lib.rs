@@ -6,6 +6,7 @@ pub mod render;
 pub mod container;
 pub mod scripts;
 pub mod shell_safety;
+pub mod watch;
 
 use bollard::Docker;
 use std::collections::HashMap;

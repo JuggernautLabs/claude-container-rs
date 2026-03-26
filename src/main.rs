@@ -6,6 +6,7 @@ mod container;
 mod render;
 pub mod scripts;
 mod shell_safety;
+mod watch;
 
 use clap::{Parser, Subcommand};
 use types::*;
@@ -232,6 +233,15 @@ enum SessionAction {
         #[arg(value_enum)]
         role: CliRepoRole,
     },
+    /// Watch for changes in container and host repos
+    Watch {
+        /// Poll interval in seconds
+        #[arg(long, default_value = "3")]
+        interval: u64,
+        /// Command to run on change (after --)
+        #[arg(trailing_var_arg = true, last = true)]
+        command: Vec<String>,
+    },
     /// Set a session property
     Set { key: String, value: String },
 }
@@ -298,6 +308,9 @@ async fn main() -> anyhow::Result<()> {
                 }
                 SessionAction::SetRole { repo, role } => {
                     cmd_session_set_role(&name, &repo, role).await?;
+                }
+                SessionAction::Watch { interval, command } => {
+                    cmd_watch(&name, f, interval, &command).await?;
                 }
                 SessionAction::Set { key, value } => {
                     eprintln!("Setting {}={} — not yet wired to metadata", key, value);
@@ -1280,6 +1293,79 @@ async fn cmd_session_set_dir(name: &SessionName, target: Option<&str>) -> anyhow
             eprintln!("  {} Main project cleared (defaults to /workspace)", colored::Colorize::green("✓"));
         }
     }
+    Ok(())
+}
+
+async fn cmd_watch(
+    name: &SessionName,
+    filter: Option<&str>,
+    interval_secs: u64,
+    command: &[String],
+) -> anyhow::Result<()> {
+    let lc = lifecycle::Lifecycle::new()?;
+    lc.ensure_util_image().await;
+    let sm = session::SessionManager::new(lc.docker_client().clone());
+
+    let config = sm.read_or_discover_config(name).await?;
+
+    let mut repo_paths: std::collections::HashMap<String, std::path::PathBuf> = config.projects.iter()
+        .filter(|(_, pcfg)| pcfg.role == types::config::RepoRole::Project)
+        .map(|(pname, pcfg)| (pname.clone(), pcfg.path.clone()))
+        .collect();
+
+    if let Some(pattern) = filter {
+        let re = regex::Regex::new(pattern)?;
+        repo_paths.retain(|name, _| re.is_match(name));
+    }
+
+    if repo_paths.is_empty() {
+        anyhow::bail!("No repos to watch");
+    }
+
+    eprintln!("[{}] watching {} repo(s), polling every {}s",
+        colored::Colorize::blue(name.to_string().as_str()),
+        repo_paths.len(),
+        interval_secs);
+    eprintln!("  press Ctrl-C to stop");
+    eprintln!();
+
+    let mut watcher = watch::Watcher::new(
+        lc.docker_client().clone(),
+        name.clone(),
+        repo_paths,
+        std::time::Duration::from_secs(interval_secs),
+    );
+
+    let start = std::time::Instant::now();
+    let mut cmd_child: Option<std::process::Child> = None;
+
+    watcher.run(|events, summary| {
+        // Print each new event
+        for event in events {
+            eprintln!("{}", watch::format_event(event, start));
+
+            // If we have a command and something changed in the container, restart it
+            if !command.is_empty() && event.source == watch::ChangeSource::Container {
+                if let Some(ref mut child) = cmd_child {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                let child = std::process::Command::new(&command[0])
+                    .args(&command[1..])
+                    .spawn();
+                match child {
+                    Ok(c) => { cmd_child = Some(c); }
+                    Err(e) => { eprintln!("  {} command failed: {}", colored::Colorize::red("✗"), e); }
+                }
+            }
+        }
+
+        // Update status line
+        if events.is_empty() {
+            // Periodic — just update the summary
+        }
+    }).await;
+
     Ok(())
 }
 
