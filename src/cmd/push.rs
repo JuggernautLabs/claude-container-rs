@@ -8,10 +8,8 @@ use super::sync_cmd::build_sync_plan;
 pub(crate) async fn cmd_push(name: &SessionName, branch: &str, filter: Option<&str>, include_deps: bool, dry_run: bool, auto_yes: bool) -> anyhow::Result<()> {
     let (_lc, engine, plan, repo_paths) = build_sync_plan(name, branch, filter, include_deps).await?;
 
-    let has_pushes = plan.action.repo_actions.iter().any(|a| matches!(
-        a.decision,
-        SyncDecision::Push { .. } | SyncDecision::PushToContainer
-    ));
+    let has_pushes = plan.action.repo_actions.iter()
+        .any(|a| !matches!(a.state.push_action(), PushAction::Skip));
 
     render::sync_plan_directed(&plan.action, "push");
 
@@ -25,7 +23,7 @@ pub(crate) async fn cmd_push(name: &SessionName, branch: &str, filter: Option<&s
     }
 
     eprintln!();
-    let result = engine.execute_sync(name, plan.action, &repo_paths).await?;
+    let result = engine.execute_push(name, plan.action, &repo_paths).await?;
     render::sync_result(&result);
     Ok(())
 }

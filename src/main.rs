@@ -260,6 +260,14 @@ async fn main() -> anyhow::Result<()> {
     // Restore terminal sanity in case a previous session leaked raw mode.
     container::restore_terminal();
 
+    // Global Ctrl-C handler — ensures process exits even during blocking Docker calls.
+    // The attach loop installs its own handler that overrides this one.
+    let _ = ctrlc::set_handler(move || {
+        container::restore_terminal();
+        eprintln!("\nInterrupted.");
+        std::process::exit(130);
+    });
+
     let cli = Cli::parse();
     let auto_yes = cli.yes;
 

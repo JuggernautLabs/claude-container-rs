@@ -38,7 +38,7 @@ impl ImageValidation {
 }
 
 /// Required binaries in the image (no fallback)
-pub const CRITICAL_BINARIES: &[&str] = &["gosu", "git", "claude", "bash"];
+pub const CRITICAL_BINARIES: &[&str] = &["git", "bash"];
 
-/// Optional binaries (warning only)
-pub const OPTIONAL_BINARIES: &[&str] = &["python3", "sudo", "docker"];
+/// Optional binaries (warning only — entrypoint handles absence gracefully)
+pub const OPTIONAL_BINARIES: &[&str] = &["claude", "gosu", "sudo", "python3", "docker"];

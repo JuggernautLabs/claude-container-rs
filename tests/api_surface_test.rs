@@ -325,8 +325,8 @@ async fn plan_sync_classifies_new_container_work() {
     assert_eq!(plan.action.repo_actions.len(), 1);
     let action = &plan.action.repo_actions[0];
     assert!(
-        matches!(action.decision, SyncDecision::CloneToHost),
-        "first sync should be CloneToHost, got {:?}", action.decision
+        matches!(action.state.pull_action(), PullAction::CloneToHost),
+        "first sync should be CloneToHost, got {:?}", action.state.pull_action()
     );
 
     // Extract to create session branch
@@ -336,8 +336,8 @@ async fn plan_sync_classifies_new_container_work() {
     let plan2 = engine.plan_sync(&sn, &main_name, &configs).await.unwrap();
     let action2 = &plan2.action.repo_actions[0];
     assert!(
-        matches!(action2.decision, SyncDecision::MergeToTarget { .. }),
-        "after extract, should be MergeToTarget, got {:?}", action2.decision
+        matches!(action2.state.pull_action(), PullAction::MergeToTarget { .. }),
+        "after extract, should be MergeToTarget, got {:?}", action2.state.pull_action()
     );
 }
 
@@ -369,11 +369,12 @@ async fn plan_sync_skips_when_already_synced() {
     // Property: plan is NOT destructive (already synced)
     assert!(!plan.destructive, "no-op plan should not be destructive");
 
-    // Property: decision is Skip
+    // Property: no work to do
     let action = &plan.action.repo_actions[0];
     assert!(
-        matches!(action.decision, SyncDecision::Skip { .. }),
-        "identical state should Skip, got {:?}", action.decision
+        !action.state.has_work(),
+        "identical state should have no work, got pull={:?} push={:?}",
+        action.state.pull_action(), action.state.push_action()
     );
 }
 
@@ -449,8 +450,8 @@ async fn execute_sync_merge_to_target_no_extraction() {
 
     let action = &plan.action.repo_actions[0];
     assert!(
-        matches!(action.decision, SyncDecision::MergeToTarget { .. }),
-        "should be MergeToTarget after extract without merge, got {:?}", action.decision
+        matches!(action.state.pull_action(), PullAction::MergeToTarget { .. }),
+        "should be MergeToTarget after extract without merge, got {:?}", action.state.pull_action()
     );
 
     // Step 3: execute — should produce Merged (not Pulled with 0 commits)
@@ -679,11 +680,11 @@ async fn plan_sync_handles_multiple_repos() {
     let alpha = plan.action.repo_actions.iter().find(|a| a.repo_name == "alpha").unwrap();
     let beta = plan.action.repo_actions.iter().find(|a| a.repo_name == "beta").unwrap();
 
-    assert!(matches!(alpha.decision, SyncDecision::CloneToHost | SyncDecision::Pull { .. }),
-        "alpha should need sync, got {:?}", alpha.decision);
+    assert!(matches!(alpha.state.pull_action(), PullAction::CloneToHost | PullAction::Extract { .. }),
+        "alpha should need sync, got {:?}", alpha.state.pull_action());
     // beta also hasn't been extracted yet, so it's CloneToHost too (even though no new commits)
-    assert!(matches!(beta.decision, SyncDecision::CloneToHost | SyncDecision::Skip { .. }),
-        "beta should be CloneToHost or Skip, got {:?}", beta.decision);
+    assert!(matches!(beta.state.pull_action(), PullAction::CloneToHost | PullAction::Skip),
+        "beta should be CloneToHost or Skip, got {:?}", beta.state.pull_action());
 }
 
 // ============================================================================

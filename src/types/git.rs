@@ -359,6 +359,241 @@ impl RepoPair {
 }
 
 // ============================================================================
+// Two-leg state model — separates observation from action
+// ============================================================================
+//
+// Three reference points per repo:
+//   Container HEAD ←leg1→ Session Branch HEAD ←leg2→ Target Branch HEAD
+//
+// LegState observes leg1 (extraction). MergeLeg observes leg2 (merge).
+// Direction-specific actions are derived at render/execute time.
+
+/// Full observed state of a repo across all three reference points.
+/// No directional bias — captures what IS, not what to DO.
+#[derive(Debug, Clone)]
+pub struct RepoState {
+    /// Container HEAD vs Session Branch HEAD
+    pub extraction: LegState,
+    /// Session Branch HEAD vs Target Branch HEAD
+    pub merge: MergeLeg,
+    /// Blockers preventing any operations
+    pub blocker: Option<Blocker>,
+}
+
+/// Relationship between container and session branch (leg 1).
+#[derive(Debug, Clone, PartialEq)]
+pub enum LegState {
+    /// Same commit
+    InSync,
+    /// Container has commits not on session branch
+    ContainerAhead { commits: u32 },
+    /// Session branch has commits not in container
+    SessionAhead { commits: u32 },
+    /// Both have independent commits
+    Diverged { container_ahead: u32, session_ahead: u32 },
+    /// Container commit not known on host (needs extraction first)
+    Unknown,
+    /// No session branch exists on host
+    NoSessionBranch,
+    /// No container repo (host-only)
+    NoContainer,
+    /// Trees identical despite different SHAs (squash artifact)
+    ContentIdentical,
+}
+
+/// Relationship between session branch and target branch (leg 2).
+#[derive(Debug, Clone, PartialEq)]
+pub enum MergeLeg {
+    /// No target branch specified
+    NoTarget,
+    /// Session and target at same commit or identical content
+    InSync,
+    /// Session has work to merge into target
+    SessionAhead { commits: u32 },
+    /// Target has work session doesn't have
+    TargetAhead { commits: u32, all_squash: bool },
+    /// Both have independent commits
+    Diverged { session_ahead: u32, target_ahead: u32 },
+    /// Trees identical (squash absorbed, nothing to do)
+    ContentIdentical,
+}
+
+/// What prevents operations.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Blocker {
+    ContainerDirty(u32),
+    ContainerMerging,
+    ContainerRebasing,
+    HostDirty,
+    HostNotARepo(PathBuf),
+}
+
+impl std::fmt::Display for Blocker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ContainerDirty(n) => write!(f, "{} dirty file(s) in container", n),
+            Self::ContainerMerging => write!(f, "merge in progress in container"),
+            Self::ContainerRebasing => write!(f, "rebase in progress in container"),
+            Self::HostDirty => write!(f, "host has uncommitted changes"),
+            Self::HostNotARepo(p) => write!(f, "host path not a git repo: {}", p.display()),
+        }
+    }
+}
+
+/// What pull (container→host) should do. Only 6 valid variants.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PullAction {
+    Skip,
+    Extract { commits: u32 },
+    CloneToHost,
+    MergeToTarget { commits: u32 },
+    Reconcile,
+    Blocked(Blocker),
+}
+
+/// What push (host→container) should do. Only 4 valid variants.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PushAction {
+    Skip,
+    Inject { commits: u32 },
+    PushToContainer,
+    Blocked(Blocker),
+}
+
+impl RepoState {
+    /// Derive what pull (container→host) should do.
+    pub fn pull_action(&self) -> PullAction {
+        if let Some(ref b) = self.blocker {
+            return PullAction::Blocked(b.clone());
+        }
+        match &self.extraction {
+            LegState::ContainerAhead { commits } => PullAction::Extract { commits: *commits },
+            LegState::Diverged { .. } => PullAction::Reconcile,
+            LegState::Unknown => PullAction::Extract { commits: 1 },
+            LegState::NoSessionBranch => PullAction::CloneToHost,
+            LegState::InSync | LegState::ContentIdentical => {
+                // Nothing to extract — check merge leg
+                match &self.merge {
+                    MergeLeg::SessionAhead { commits } => PullAction::MergeToTarget { commits: *commits },
+                    MergeLeg::Diverged { session_ahead, .. } => PullAction::MergeToTarget { commits: *session_ahead },
+                    _ => PullAction::Skip,
+                }
+            }
+            LegState::SessionAhead { .. } => PullAction::Skip,
+            LegState::NoContainer => PullAction::Skip,
+        }
+    }
+
+    /// Derive what push (host→container) should do.
+    pub fn push_action(&self) -> PushAction {
+        if let Some(ref b) = self.blocker {
+            return PushAction::Blocked(b.clone());
+        }
+        match &self.merge {
+            MergeLeg::TargetAhead { commits, .. } => PushAction::Inject { commits: *commits },
+            MergeLeg::Diverged { target_ahead, .. } => PushAction::Inject { commits: *target_ahead },
+            _ => {
+                match &self.extraction {
+                    LegState::SessionAhead { commits } => PushAction::Inject { commits: *commits },
+                    LegState::NoContainer => PushAction::PushToContainer,
+                    _ => PushAction::Skip,
+                }
+            }
+        }
+    }
+
+    /// Is there any work in any direction?
+    pub fn has_work(&self) -> bool {
+        self.pull_action() != PullAction::Skip || self.push_action() != PushAction::Skip
+    }
+}
+
+impl RepoPair {
+    /// Build the two-leg RepoState from the pair's observed data.
+    /// This replaces sync_decision() as the primary classification output.
+    pub fn repo_state(&self) -> RepoState {
+        use GitSide::*;
+
+        // ── Blocker detection ──
+        let blocker = match (&self.container, &self.host) {
+            (Dirty { dirty_files, .. }, _) => Some(Blocker::ContainerDirty(*dirty_files)),
+            (Merging { .. }, _) => Some(Blocker::ContainerMerging),
+            (Rebasing { .. }, _) => Some(Blocker::ContainerRebasing),
+            (_, Dirty { .. }) | (_, Merging { .. }) | (_, Rebasing { .. }) => Some(Blocker::HostDirty),
+            (_, NotARepo { path }) => Some(Blocker::HostNotARepo(path.clone())),
+            _ => None,
+        };
+
+        // ── Leg 1: Container vs Session (extraction) ──
+        let extraction = match (&self.container, &self.host) {
+            (Missing, _) | (NotARepo { .. }, _) => LegState::NoContainer,
+            (_, Missing) | (_, NotARepo { .. }) => LegState::NoSessionBranch,
+            (Clean { head: c }, Clean { head: h }) | (Dirty { head: c, .. }, Clean { head: h }) |
+            (Clean { head: c }, Dirty { head: h, .. }) | (Dirty { head: c, .. }, Dirty { head: h, .. }) |
+            (Merging { head: c }, Clean { head: h }) | (Rebasing { head: c }, Clean { head: h }) |
+            (Clean { head: c }, Merging { head: h }) | (Clean { head: c }, Rebasing { head: h }) |
+            (Merging { head: c }, Dirty { head: h, .. }) | (Rebasing { head: c }, Dirty { head: h, .. }) |
+            (Dirty { head: c, .. }, Merging { head: h }) | (Dirty { head: c, .. }, Rebasing { head: h }) |
+            (Merging { head: c }, Merging { head: h }) | (Merging { head: c }, Rebasing { head: h }) |
+            (Rebasing { head: c }, Merging { head: h }) | (Rebasing { head: c }, Rebasing { head: h }) => {
+                if c == h {
+                    LegState::InSync
+                } else if let Some(rel) = &self.relation {
+                    if rel.content == ContentComparison::Identical {
+                        LegState::ContentIdentical
+                    } else {
+                        match &rel.ancestry {
+                            Ancestry::Same => LegState::InSync,
+                            Ancestry::ContainerAhead { container_ahead } =>
+                                LegState::ContainerAhead { commits: *container_ahead },
+                            Ancestry::ContainerBehind { host_ahead } =>
+                                LegState::SessionAhead { commits: *host_ahead },
+                            Ancestry::Diverged { container_ahead, host_ahead, .. } =>
+                                LegState::Diverged { container_ahead: *container_ahead, session_ahead: *host_ahead },
+                            Ancestry::Unknown => LegState::Unknown,
+                        }
+                    }
+                } else {
+                    LegState::Unknown
+                }
+            }
+        };
+
+        // ── Leg 2: Session vs Target (merge) ──
+        let merge = if self.target_head.is_none() {
+            MergeLeg::NoTarget
+        } else if let Some(ref st_rel) = self.session_to_target {
+            if st_rel.content == ContentComparison::Identical {
+                MergeLeg::ContentIdentical
+            } else {
+                match &st_rel.ancestry {
+                    Ancestry::Same => MergeLeg::InSync,
+                    // "container" in SessionTargetRelation means session, "host" means target
+                    Ancestry::ContainerAhead { container_ahead } =>
+                        MergeLeg::SessionAhead { commits: *container_ahead },
+                    Ancestry::ContainerBehind { host_ahead } => {
+                        let all_squash = self.relation.as_ref()
+                            .map_or(false, |r| r.target_ahead == TargetAheadKind::AllSquashArtifacts);
+                        MergeLeg::TargetAhead { commits: *host_ahead, all_squash }
+                    }
+                    Ancestry::Diverged { container_ahead, host_ahead, .. } =>
+                        MergeLeg::Diverged { session_ahead: *container_ahead, target_ahead: *host_ahead },
+                    Ancestry::Unknown => MergeLeg::NoTarget,
+                }
+            }
+        } else {
+            // No session_to_target relation but target_head exists — compare directly
+            match (&self.container.head(), &self.target_head) {
+                (Some(c), Some(t)) if c.as_str() == t.as_str() => MergeLeg::InSync,
+                _ => MergeLeg::NoTarget,
+            }
+        };
+
+        RepoState { extraction, merge, blocker }
+    }
+}
+
+// ============================================================================
 // Merge outcome (result of attempting/dry-running a merge)
 // ============================================================================
 

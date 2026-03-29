@@ -99,28 +99,30 @@ pub(crate) async fn cmd_session_exec(name: &SessionName, as_root: bool, command:
         _ => anyhow::bail!("Container not running. Start it first."),
     }
 
-    let cmd = shell_safety::build_exec_cmd(command);
+    if crate::container::is_tty() {
+        crate::container::exec_interactive(&lc, &container_name, command, as_root).await?;
+    } else {
+        // Non-interactive: capture output
+        let cmd = shell_safety::build_exec_cmd(command);
+        let exec = docker.create_exec(
+            container_name.as_str(),
+            bollard::exec::CreateExecOptions {
+                cmd: Some(cmd),
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                user: Some(if as_root { "root".to_string() } else { "developer".to_string() }),
+                ..Default::default()
+            },
+        ).await?;
 
-    let exec = docker.create_exec(
-        container_name.as_str(),
-        bollard::exec::CreateExecOptions {
-            cmd: Some(cmd),
-            attach_stdout: Some(true),
-            attach_stderr: Some(true),
-            user: Some(if as_root { "root".to_string() } else { "developer".to_string() }),
-            ..Default::default()
-        },
-    ).await?;
-
-    let output = docker.start_exec(&exec.id, None::<bollard::exec::StartExecOptions>).await?;
-
-    if let bollard::exec::StartExecResults::Attached { mut output, .. } = output {
-        use futures_util::StreamExt;
-        while let Some(Ok(chunk)) = output.next().await {
-            print!("{}", chunk);
+        let output = docker.start_exec(&exec.id, None::<bollard::exec::StartExecOptions>).await?;
+        if let bollard::exec::StartExecResults::Attached { mut output, .. } = output {
+            use futures_util::StreamExt;
+            while let Some(Ok(chunk)) = output.next().await {
+                print!("{}", chunk);
+            }
         }
     }
-
     Ok(())
 }
 

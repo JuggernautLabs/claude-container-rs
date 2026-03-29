@@ -134,7 +134,7 @@ fn sync_plan_inner(plan: &SessionSyncPlan, label: &str, direction: &str) {
     rule(Some(label));
     let is_push = direction == "push";
 
-    // Classify actions into groups — direction-aware
+    // Classify actions into groups using two-leg state model
     let mut ready: Vec<&RepoSyncAction> = Vec::new();
     let mut pending_merge: Vec<&RepoSyncAction> = Vec::new();
     let mut diverged: Vec<&RepoSyncAction> = Vec::new();
@@ -143,21 +143,27 @@ fn sync_plan_inner(plan: &SessionSyncPlan, label: &str, direction: &str) {
     let mut unchanged = 0u32;
 
     for action in &plan.repo_actions {
-        match &action.decision {
-            SyncDecision::Skip { .. } => unchanged += 1,
-            SyncDecision::Pull { .. } | SyncDecision::CloneToHost => {
-                if is_push { unchanged += 1; } else { ready.push(action); }
+        if is_push {
+            match action.state.push_action() {
+                PushAction::Skip => unchanged += 1,
+                PushAction::Inject { .. } | PushAction::PushToContainer => ready.push(action),
+                PushAction::Blocked(_) => blocked.push(action),
             }
-            SyncDecision::Push { .. } | SyncDecision::PushToContainer => {
-                if is_push { ready.push(action); } else { skipped.push(action); }
+        } else {
+            match action.state.pull_action() {
+                PullAction::Skip => {
+                    // Check if there's push work to show as skipped
+                    if matches!(action.state.push_action(), PushAction::Inject { .. } | PushAction::PushToContainer) {
+                        skipped.push(action);
+                    } else {
+                        unchanged += 1;
+                    }
+                }
+                PullAction::Extract { .. } | PullAction::CloneToHost => ready.push(action),
+                PullAction::MergeToTarget { .. } => pending_merge.push(action),
+                PullAction::Reconcile => diverged.push(action),
+                PullAction::Blocked(_) => blocked.push(action),
             }
-            SyncDecision::Reconcile { .. } => {
-                diverged.push(action);
-            }
-            SyncDecision::MergeToTarget { .. } => {
-                if is_push { unchanged += 1; } else { pending_merge.push(action); }
-            }
-            SyncDecision::Blocked { .. } => blocked.push(action),
         }
     }
 
@@ -181,18 +187,26 @@ fn sync_plan_inner(plan: &SessionSyncPlan, label: &str, direction: &str) {
     }
     println!();
 
-    // Ready repos — clean pulls
+    // Ready repos — typed descriptions
     for action in &ready {
         let name = display_name(action);
-        let desc = match &action.decision {
-            SyncDecision::Pull { commits } => format!("squash-merge {} commit(s) into {}", commits, plan.target_branch),
-            SyncDecision::CloneToHost => "first extract".into(),
-            SyncDecision::Push { commits } => format!("{} host commit(s) → container", commits),
-            SyncDecision::PushToContainer => "push to container".into(),
-            _ => String::new(),
+        let desc = if is_push {
+            match action.state.push_action() {
+                PushAction::Inject { commits } => format!("{} commit(s) on {} → container", commits, plan.target_branch),
+                PushAction::PushToContainer => "push to container".into(),
+                _ => String::new(),
+            }
+        } else {
+            match action.state.pull_action() {
+                PullAction::Extract { commits } => format!("squash-merge {} commit(s) into {}", commits, plan.target_branch),
+                PullAction::CloneToHost => "first extract".into(),
+                _ => String::new(),
+            }
         };
         println!("  {} {} — {}", "✓".green(), name, desc);
-        render_diffstat(&action.outbound_diff);
+        render_hash_line(action, &plan.target_branch);
+        let diff_ref = if is_push { &action.inbound_diff } else { &action.outbound_diff };
+        render_diffstat(diff_ref);
     }
 
     // Pending merge — session branch ahead of target, needs squash-merge
@@ -200,8 +214,9 @@ fn sync_plan_inner(plan: &SessionSyncPlan, label: &str, direction: &str) {
         if !ready.is_empty() { println!(); }
         for action in &pending_merge {
             let name = display_name(action);
-            let ahead = match &action.decision {
-                SyncDecision::MergeToTarget { session_ahead, .. } => *session_ahead,
+            let ahead = match &action.state.merge {
+                MergeLeg::SessionAhead { commits } => *commits,
+                MergeLeg::Diverged { session_ahead, .. } => *session_ahead,
                 _ => 0,
             };
             let has_conflict = action.trial_conflicts.as_ref().map_or(false, |f| !f.is_empty());
@@ -214,6 +229,7 @@ fn sync_plan_inner(plan: &SessionSyncPlan, label: &str, direction: &str) {
                 println!("  {} {} — {} commit(s) ahead of {}",
                     "→".blue(), name, ahead, plan.target_branch);
             }
+            render_hash_line(action, &plan.target_branch);
             render_diffstat(&action.session_to_target_diff);
         }
     }
@@ -222,11 +238,12 @@ fn sync_plan_inner(plan: &SessionSyncPlan, label: &str, direction: &str) {
     if !diverged.is_empty() {
         println!();
         for action in &diverged {
-            let (ca, ha) = match &action.decision {
-                SyncDecision::Reconcile { container_ahead, host_ahead } => (*container_ahead, *host_ahead),
+            let (ca, ha) = match &action.state.extraction {
+                LegState::Diverged { container_ahead, session_ahead } => (*container_ahead, *session_ahead),
                 _ => (0, 0),
             };
             println!("  {} {} — container +{}, host +{}", "↔".yellow(), display_name(action), ca, ha);
+            render_hash_line(action, &plan.target_branch);
             render_diffstat(&action.outbound_diff);
 
             // Show trial merge result
@@ -250,9 +267,9 @@ fn sync_plan_inner(plan: &SessionSyncPlan, label: &str, direction: &str) {
         println!();
         println!("  {}:", "skipped".dimmed());
         for action in &skipped {
-            let reason = match &action.decision {
-                SyncDecision::Push { commits } => format!("host ahead by {} (use push)", commits),
-                SyncDecision::PushToContainer => "push to container".into(),
+            let reason = match action.state.push_action() {
+                PushAction::Inject { commits } => format!("host ahead by {} (use push)", commits),
+                PushAction::PushToContainer => "push to container".into(),
                 _ => "skipped".into(),
             };
             println!("    {} — {}", display_name(action), reason.dimmed());
@@ -264,15 +281,9 @@ fn sync_plan_inner(plan: &SessionSyncPlan, label: &str, direction: &str) {
         println!();
         println!("  {}:", "blocked".dimmed());
         for action in &blocked {
-            let reason = match &action.decision {
-                SyncDecision::Blocked { reason } => match reason {
-                    BlockReason::ContainerDirty(n) => format!("{} dirty file(s) in container", n),
-                    BlockReason::HostDirty => "host has uncommitted changes".into(),
-                    BlockReason::ContainerMerging => "merge in progress in container".into(),
-                    BlockReason::ContainerRebasing => "rebase in progress in container".into(),
-                    BlockReason::HostNotARepo(p) => format!("host path not a git repo: {}", p.display()),
-                },
-                _ => "blocked".into(),
+            let reason = match &action.state.blocker {
+                Some(b) => format!("{}", b),
+                None => "blocked".into(),
             };
             println!("    {} {} ({})", "!".yellow(), display_name(action), reason);
         }
@@ -288,16 +299,17 @@ fn sync_plan_inner(plan: &SessionSyncPlan, label: &str, direction: &str) {
     let mut total_del = 0u32;
     let mut has_diffstat = false;
 
-    if let Some(diff) = ready.iter().find_map(|a| a.outbound_diff.as_ref()) {
-        // Only show full diffstat section if there are actual diffs
-        if ready.iter().any(|a| a.outbound_diff.as_ref().map_or(false, |d| !d.files.is_empty())) {
-            println!("session → {} diff:", plan.target_branch);
-            has_diffstat = true;
-        }
+    fn get_diff<'a>(action: &'a RepoSyncAction, is_push: bool) -> Option<&'a DiffSummary> {
+        if is_push { action.inbound_diff.as_ref() } else { action.outbound_diff.as_ref() }
+    }
+
+    if ready.iter().any(|a| get_diff(a, is_push).map_or(false, |d| !d.files.is_empty())) {
+        println!("session → {} diff:", plan.target_branch);
+        has_diffstat = true;
     }
 
     for action in &ready {
-        if let Some(diff) = &action.outbound_diff {
+        if let Some(diff) = get_diff(action, is_push) {
             if diff.files.is_empty() { continue; }
             println!("  {}", display_name(action).blue());
 
@@ -340,6 +352,23 @@ fn render_change_bar(insertions: u32, deletions: u32, max_width: u32) -> String 
         "+".repeat(plus_count).green(),
         "-".repeat(minus_count).red(),
     )
+}
+
+/// Render a dim line showing container/session/target commit hashes.
+fn render_hash_line(action: &RepoSyncAction, target_branch: &str) {
+    let mut parts = Vec::new();
+    if let Some(ref h) = action.container_head {
+        parts.push(format!("container:{}", &h.as_str()[..7.min(h.as_str().len())]));
+    }
+    if let Some(ref h) = action.session_head {
+        parts.push(format!("session:{}", &h.as_str()[..7.min(h.as_str().len())]));
+    }
+    if let Some(ref h) = action.target_head {
+        parts.push(format!("{}:{}", target_branch, &h.as_str()[..7.min(h.as_str().len())]));
+    }
+    if !parts.is_empty() {
+        println!("    {}", parts.join("  ").dimmed());
+    }
 }
 
 fn render_diffstat(diff: &Option<DiffSummary>) {

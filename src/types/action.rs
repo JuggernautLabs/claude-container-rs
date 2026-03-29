@@ -65,13 +65,20 @@ impl<A: Action> fmt::Display for Plan<A> {
 // Concrete plan types for each subsystem
 // ============================================================================
 
-/// A sync plan for a single repo
+/// A sync plan for a single repo.
+/// Carries the observed two-leg state. Direction-specific actions are derived
+/// by the caller via `state.pull_action()` / `state.push_action()`.
 #[derive(Debug)]
 pub struct RepoSyncAction {
     pub repo_name: String,
     /// Host path for this repo (for display as relative path)
     pub host_path: Option<std::path::PathBuf>,
-    pub decision: super::git::SyncDecision,
+    /// Two-leg observed state (extraction + merge legs)
+    pub state: super::git::RepoState,
+    /// Commit hashes for display
+    pub container_head: Option<super::CommitHash>,
+    pub session_head: Option<super::CommitHash>,
+    pub target_head: Option<super::CommitHash>,
     /// What the diff would look like (precomputed at preview time)
     pub outbound_diff: Option<DiffSummary>,
     pub inbound_diff: Option<DiffSummary>,
@@ -92,38 +99,36 @@ pub struct SessionSyncPlan {
 impl SessionSyncPlan {
     pub fn pulls(&self) -> Vec<&RepoSyncAction> {
         self.repo_actions.iter()
-            .filter(|a| matches!(a.decision, super::git::SyncDecision::Pull { .. }))
+            .filter(|a| matches!(a.state.pull_action(), super::git::PullAction::Extract { .. } | super::git::PullAction::CloneToHost))
             .collect()
     }
     pub fn pushes(&self) -> Vec<&RepoSyncAction> {
         self.repo_actions.iter()
-            .filter(|a| matches!(a.decision, super::git::SyncDecision::Push { .. }))
+            .filter(|a| matches!(a.state.push_action(), super::git::PushAction::Inject { .. } | super::git::PushAction::PushToContainer))
             .collect()
     }
     pub fn reconciles(&self) -> Vec<&RepoSyncAction> {
         self.repo_actions.iter()
-            .filter(|a| matches!(a.decision, super::git::SyncDecision::Reconcile { .. }))
+            .filter(|a| matches!(a.state.pull_action(), super::git::PullAction::Reconcile))
             .collect()
     }
     pub fn blocked(&self) -> Vec<&RepoSyncAction> {
         self.repo_actions.iter()
-            .filter(|a| matches!(a.decision, super::git::SyncDecision::Blocked { .. }))
+            .filter(|a| a.state.blocker.is_some())
             .collect()
     }
     pub fn skipped(&self) -> Vec<&RepoSyncAction> {
         self.repo_actions.iter()
-            .filter(|a| matches!(a.decision, super::git::SyncDecision::Skip { .. }))
+            .filter(|a| !a.state.has_work())
             .collect()
     }
     pub fn pending_merges(&self) -> Vec<&RepoSyncAction> {
         self.repo_actions.iter()
-            .filter(|a| matches!(a.decision, super::git::SyncDecision::MergeToTarget { .. }))
+            .filter(|a| matches!(a.state.pull_action(), super::git::PullAction::MergeToTarget { .. }))
             .collect()
     }
     pub fn has_work(&self) -> bool {
-        self.repo_actions.iter().any(|a| !matches!(a.decision,
-            super::git::SyncDecision::Skip { .. } | super::git::SyncDecision::Blocked { .. }
-        ))
+        self.repo_actions.iter().any(|a| a.state.has_work())
     }
     pub fn is_destructive(&self) -> bool {
         self.has_work()

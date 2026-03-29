@@ -11,12 +11,43 @@
 #     - Sudo/rootish setup
 #     - Install fin command
 #     - Stage files for developer (gitconfig)
-#     - exec gosu developer cc-developer-setup
+#     - exec as developer → cc-developer-setup
 #
 #   Phase 2+3 happen in cc-developer-setup (runs as developer)
 #
 # NO set -e. Every non-critical operation uses || true.
-# NO chown. Developer creates its own files via gosu.
+
+# ============================================================================
+# Privilege drop helper — works with any base image
+# ============================================================================
+# Tries gosu (best), then su (most images), then sudo, then runs directly.
+_exec_as_developer() {
+    if command -v gosu >/dev/null 2>&1; then
+        exec gosu developer "$@"
+    elif command -v su >/dev/null 2>&1; then
+        exec su -s /bin/bash developer -c "$(printf '%q ' "$@")"
+    elif command -v sudo >/dev/null 2>&1; then
+        exec sudo -u developer -E -- "$@"
+    else
+        # No privilege drop available — run as current user with warning
+        echo "WARNING: no gosu/su/sudo — running as $(whoami)" >&2
+        exec "$@"
+    fi
+}
+
+# For inline bash commands (bash -c "...")
+_exec_as_developer_bash() {
+    if command -v gosu >/dev/null 2>&1; then
+        exec gosu developer bash -c "$1"
+    elif command -v su >/dev/null 2>&1; then
+        exec su -s /bin/bash developer -c "$1"
+    elif command -v sudo >/dev/null 2>&1; then
+        exec sudo -u developer -E bash -c "$1"
+    else
+        echo "WARNING: no gosu/su/sudo — running as $(whoami)" >&2
+        exec bash -c "$1"
+    fi
+}
 
 # ============================================================================
 # Token Setup
@@ -142,7 +173,7 @@ if [[ "${SHELL_ONLY:-}" == "1" ]]; then
         [[ -d "/workspace/$MAIN_PROJ" ]] && WORK_DIR="/workspace/$MAIN_PROJ"
     fi
     if [[ "${RUN_AS_USER:-}" == "1" ]] || [[ "${RUN_AS_ROOTISH:-}" == "1" ]]; then
-        exec gosu developer bash -c "export CLAUDE_CODE_OAUTH_TOKEN='$CLAUDE_CODE_OAUTH_TOKEN' && cd $WORK_DIR && exec bash"
+        _exec_as_developer_bash "export CLAUDE_CODE_OAUTH_TOKEN='$CLAUDE_CODE_OAUTH_TOKEN' && cd $WORK_DIR && exec bash"
     else
         exec bash -c "cd $WORK_DIR && exec bash"
     fi
@@ -160,7 +191,7 @@ if [[ -n "${BASH_EXEC:-}" ]]; then
     fi
     cd "$WORK_DIR"
     if [[ "${RUN_AS_USER:-}" == "1" ]] || [[ "${RUN_AS_ROOTISH:-}" == "1" ]]; then
-        exec gosu developer bash -c "$BASH_EXEC"
+        _exec_as_developer_bash "$BASH_EXEC"
     else
         exec bash -c "$BASH_EXEC"
     fi
@@ -231,12 +262,25 @@ if [[ -f /root/.gitconfig ]]; then
 fi
 
 # ============================================================================
+# Ensure Claude Code is installed
+# ============================================================================
+
+if ! command -v claude >/dev/null 2>&1; then
+    echo "  Installing Claude Code..."
+    if command -v npm >/dev/null 2>&1; then
+        npm install -g @anthropic-ai/claude-code 2>/dev/null || true
+    else
+        echo "WARNING: npm not found — cannot install Claude Code" >&2
+    fi
+fi
+
+# ============================================================================
 # Hand off to developer setup (Phase 2 + 3)
 # ============================================================================
 
 # cc-developer-setup does config setup then execs cc-agent-run
 if [[ "${RUN_AS_USER:-}" == "1" ]] || [[ "${RUN_AS_ROOTISH:-}" == "1" ]]; then
-    exec gosu developer /usr/local/bin/cc-developer-setup
+    _exec_as_developer /usr/local/bin/cc-developer-setup
 else
     # Pure root mode: run developer setup directly (HOME set for claude)
     HOME=/home/developer exec /usr/local/bin/cc-developer-setup

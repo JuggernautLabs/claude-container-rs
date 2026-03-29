@@ -17,7 +17,8 @@ use git2::Repository;
 use crate::types::{
     Ancestry, CommitHash, ContainerError, ContentComparison, DiffSummary, ExtractResult, GitSide,
     MergeOutcome, PairRelation, Plan, RepoPair, RepoSyncAction, RepoSyncResult, SessionName,
-    SessionSyncPlan, SquashState, SyncDecision, SyncResult, TargetAheadKind, VolumeRepo,
+    LegState, PullAction, PushAction, SessionSyncPlan, SquashState, SyncResult,
+    TargetAheadKind, VolumeRepo,
 };
 
 /// Git utility image used for container-side scans.
@@ -252,81 +253,78 @@ impl SyncEngine {
                 target_branch,
             );
 
-            let decision = pair.sync_decision();
+            let state = pair.repo_state();
 
-            // Step 3: compute diffs for repos that need them
-            let (outbound_diff, inbound_diff) = match &decision {
-                SyncDecision::Pull { .. } => {
-                    let diff = pair
-                        .host
-                        .head()
-                        .and_then(|h_head| {
-                            pair.container
-                                .head()
-                                .and_then(|c_head| self.compute_diff(&host_path, h_head, c_head))
-                        });
+            // Step 3: compute diffs using two-leg state
+            let pull_act = state.pull_action();
+            let push_act = state.push_action();
+
+            let (outbound_diff, inbound_diff) = match (&state.extraction, &push_act) {
+                // Container ahead → outbound diff (session..container)
+                (LegState::ContainerAhead { .. } | LegState::Unknown, _) => {
+                    let diff = pair.host.head().and_then(|h_head| {
+                        pair.container.head()
+                            .and_then(|c_head| self.compute_diff(&host_path, h_head, c_head))
+                    });
                     (diff, None)
                 }
-                SyncDecision::Push { .. } => {
-                    let diff = pair
-                        .container
-                        .head()
-                        .and_then(|c_head| {
-                            pair.host
-                                .head()
-                                .and_then(|h_head| self.compute_diff(&host_path, c_head, h_head))
-                        });
+                // Session ahead → inbound diff (container..session)
+                (LegState::SessionAhead { .. }, _) => {
+                    let diff = pair.container.head().and_then(|c_head| {
+                        pair.host.head()
+                            .and_then(|h_head| self.compute_diff(&host_path, c_head, h_head))
+                    });
                     (None, diff)
                 }
-                SyncDecision::Reconcile { .. } => {
+                // Diverged → both diffs from merge-base
+                (LegState::Diverged { .. }, _) => {
                     let outbound = pair.host.head().and_then(|h_head| {
                         pair.relation.as_ref().and_then(|rel| match &rel.ancestry {
-                            Ancestry::Diverged { merge_base, .. } => merge_base
-                                .as_ref()
+                            Ancestry::Diverged { merge_base, .. } => merge_base.as_ref()
                                 .and_then(|mb| self.compute_diff(&host_path, mb, h_head)),
                             _ => None,
                         })
                     });
                     let inbound = pair.container.head().and_then(|c_head| {
                         pair.relation.as_ref().and_then(|rel| match &rel.ancestry {
-                            Ancestry::Diverged { merge_base, .. } => merge_base
-                                .as_ref()
+                            Ancestry::Diverged { merge_base, .. } => merge_base.as_ref()
                                 .and_then(|mb| self.compute_diff(&host_path, mb, c_head)),
                             _ => None,
                         })
                     });
                     (outbound, inbound)
                 }
+                // Extraction in sync but push has inject work → inbound diff
+                (_, PushAction::Inject { .. }) => {
+                    let diff = pair.target_head.as_ref().and_then(|t_head| {
+                        pair.host.head()
+                            .and_then(|s_head| self.compute_diff(&host_path, s_head, t_head))
+                    });
+                    (None, diff)
+                }
                 _ => (None, None),
             };
 
-            // Trial merge for Pull/Reconcile: detect conflicts without touching disk
-            let trial_conflicts = match &decision {
-                SyncDecision::Pull { .. } | SyncDecision::Reconcile { .. } => {
-                    // ours = target branch HEAD on host, theirs = container HEAD
+            // Trial merge for Extract/Reconcile/MergeToTarget
+            let trial_conflicts = match &pull_act {
+                PullAction::Extract { .. } | PullAction::Reconcile => {
                     match (pair.host.head(), pair.container.head()) {
-                        (Some(ours), Some(theirs)) => {
-                            self.trial_merge(&host_path, ours, theirs)
-                        }
+                        (Some(ours), Some(theirs)) => self.trial_merge(&host_path, ours, theirs),
                         _ => None,
                     }
                 }
-                SyncDecision::MergeToTarget { .. } => {
-                    // ours = target branch HEAD, theirs = session branch HEAD (both on host)
+                PullAction::MergeToTarget { .. } => {
                     match (pair.target_head.as_ref(), pair.host.head()) {
-                        (Some(target), Some(session)) => {
-                            self.trial_merge(&host_path, target, session)
-                        }
+                        (Some(target), Some(session)) => self.trial_merge(&host_path, target, session),
                         _ => None,
                     }
                 }
                 _ => None,
             };
 
-            // Compute session→target diff for MergeToTarget decisions
-            let session_to_target_diff = match &decision {
-                SyncDecision::MergeToTarget { .. } => {
-                    // Get the diff from target to session
+            // Session→target diff for MergeToTarget
+            let session_to_target_diff = match &pull_act {
+                PullAction::MergeToTarget { .. } => {
                     pair.target_head.as_ref().and_then(|t_head| {
                         pair.host.head().and_then(|s_head| {
                             self.compute_diff(&host_path, t_head, s_head)
@@ -339,7 +337,10 @@ impl SyncEngine {
             repo_actions.push(RepoSyncAction {
                 repo_name: vr.name.clone(),
                 host_path: Some(host_path.clone()),
-                decision,
+                state,
+                container_head: pair.container.head().cloned(),
+                session_head: pair.host.head().cloned(),
+                target_head: pair.target_head.clone(),
                 outbound_diff,
                 inbound_diff,
                 trial_conflicts,
@@ -1462,9 +1463,59 @@ fi
     // Execute: orchestrate a full sync plan
     // ========================================================================
 
-    /// Execute a sync plan: for each repo, perform extract/merge/inject
-    /// according to the decision.
+    /// Execute a full bidirectional sync: push phase first, then pull phase.
     pub async fn execute_sync(
+        &self,
+        session: &SessionName,
+        plan: SessionSyncPlan,
+        repo_configs: &BTreeMap<String, PathBuf>,
+    ) -> Result<SyncResult, ContainerError> {
+        let target_branch = plan.target_branch.clone();
+        let session_branch = session.to_string();
+        let mut results = Vec::new();
+
+        // Push phase first: all injects
+        for action in &plan.repo_actions {
+            let push = action.state.push_action();
+            if matches!(push, PushAction::Skip) { continue; }
+            let host_path = match repo_configs.get(&action.repo_name) {
+                Some(p) => p.clone(),
+                None => continue,
+            };
+            let result = self.dispatch_push(session, &action.repo_name, &host_path, &target_branch, push).await;
+            results.push(result);
+        }
+
+        // Pull phase: all extracts + merges
+        for action in &plan.repo_actions {
+            let pull = action.state.pull_action();
+            if matches!(pull, PullAction::Skip) { continue; }
+            let host_path = match repo_configs.get(&action.repo_name) {
+                Some(p) => p.clone(),
+                None => continue,
+            };
+            let result = self.dispatch_pull(session, &action.repo_name, &host_path, &session_branch, &target_branch, pull).await;
+            results.push(result);
+        }
+
+        // Skipped repos
+        for action in &plan.repo_actions {
+            if !action.state.has_work() {
+                results.push(RepoSyncResult::Skipped {
+                    repo_name: action.repo_name.clone(),
+                    reason: "up to date".to_string(),
+                });
+            }
+        }
+
+        Ok(SyncResult {
+            session_name: session.clone(),
+            results,
+        })
+    }
+
+    /// Execute only push actions from a plan.
+    pub async fn execute_push(
         &self,
         session: &SessionName,
         plan: SessionSyncPlan,
@@ -1474,6 +1525,7 @@ fi
         let mut results = Vec::new();
 
         for action in &plan.repo_actions {
+            let push = action.state.push_action();
             let host_path = match repo_configs.get(&action.repo_name) {
                 Some(p) => p.clone(),
                 None => {
@@ -1484,163 +1536,115 @@ fi
                     continue;
                 }
             };
-
-            let session_branch = session.to_string();
-
-            let result = match &action.decision {
-                SyncDecision::Skip { reason } => {
-                    RepoSyncResult::Skipped {
-                        repo_name: action.repo_name.clone(),
-                        reason: format!("{}", reason),
-                    }
-                }
-
-                SyncDecision::Pull { .. } => {
-                    match self.execute_pull(
-                        session,
-                        &action.repo_name,
-                        &host_path,
-                        &session_branch,
-                        &target_branch,
-                    ).await {
-                        Ok(r) => r,
-                        Err(e) => RepoSyncResult::Failed {
-                            repo_name: action.repo_name.clone(),
-                            error: e.to_string(),
-                        },
-                    }
-                }
-
-                SyncDecision::Push { .. } => {
-                    match self.inject(
-                        session,
-                        &action.repo_name,
-                        &host_path,
-                        &target_branch,
-                    ).await {
-                        Ok(()) => RepoSyncResult::Pushed {
-                            repo_name: action.repo_name.clone(),
-                        },
-                        Err(e) => RepoSyncResult::Failed {
-                            repo_name: action.repo_name.clone(),
-                            error: e.to_string(),
-                        },
-                    }
-                }
-
-                SyncDecision::Reconcile { .. } => {
-                    // Reconcile: inject host → container, then extract + merge back
-                    let inject_result = self.inject(
-                        session,
-                        &action.repo_name,
-                        &host_path,
-                        &target_branch,
-                    ).await;
-
-                    match inject_result {
-                        Ok(()) => {
-                            match self.execute_pull(
-                                session,
-                                &action.repo_name,
-                                &host_path,
-                                &session_branch,
-                                &target_branch,
-                            ).await {
-                                Ok(r) => r,
-                                Err(e) => RepoSyncResult::Failed {
-                                    repo_name: action.repo_name.clone(),
-                                    error: format!("reconcile pull phase failed: {}", e),
-                                },
-                            }
-                        }
-                        Err(e) => RepoSyncResult::Failed {
-                            repo_name: action.repo_name.clone(),
-                            error: format!("reconcile inject phase failed: {}", e),
-                        },
-                    }
-                }
-
-                SyncDecision::CloneToHost => {
-                    match self.extract(
-                        session,
-                        &action.repo_name,
-                        &host_path,
-                        &session_branch,
-                    ).await {
-                        Ok(extract) => RepoSyncResult::ClonedToHost {
-                            repo_name: action.repo_name.clone(),
-                            extract,
-                        },
-                        Err(e) => RepoSyncResult::Failed {
-                            repo_name: action.repo_name.clone(),
-                            error: e.to_string(),
-                        },
-                    }
-                }
-
-                SyncDecision::PushToContainer => {
-                    match self.inject(
-                        session,
-                        &action.repo_name,
-                        &host_path,
-                        &target_branch,
-                    ).await {
-                        Ok(()) => RepoSyncResult::Pushed {
-                            repo_name: action.repo_name.clone(),
-                        },
-                        Err(e) => RepoSyncResult::Failed {
-                            repo_name: action.repo_name.clone(),
-                            error: e.to_string(),
-                        },
-                    }
-                }
-
-                SyncDecision::MergeToTarget { .. } => {
-                    // Session branch already has the work, just needs merge to target.
-                    // No extraction needed — just merge session → target.
-                    match self.merge(&host_path, &session_branch, &target_branch, true) {
-                        Ok(merge) => {
-                            if let MergeOutcome::Conflict { files } = &merge {
-                                RepoSyncResult::Conflicted {
-                                    repo_name: action.repo_name.clone(),
-                                    files: files.clone(),
-                                }
-                            } else {
-                                RepoSyncResult::Merged {
-                                    repo_name: action.repo_name.clone(),
-                                    merge,
-                                }
-                            }
-                        }
-                        Err(e) => RepoSyncResult::Failed {
-                            repo_name: action.repo_name.clone(),
-                            error: e.to_string(),
-                        },
-                    }
-                }
-
-                SyncDecision::Blocked { reason } => {
-                    RepoSyncResult::Skipped {
-                        repo_name: action.repo_name.clone(),
-                        reason: format!("blocked: {}", reason),
-                    }
-                }
-            };
-
+            let result = self.dispatch_push(session, &action.repo_name, &host_path, &target_branch, push).await;
             results.push(result);
         }
 
-        Ok(SyncResult {
-            session_name: session.clone(),
-            results,
-        })
+        Ok(SyncResult { session_name: session.clone(), results })
+    }
+
+    /// Dispatch a single PushAction — typed, no string direction.
+    async fn dispatch_push(
+        &self,
+        session: &SessionName,
+        repo_name: &str,
+        host_path: &Path,
+        target_branch: &str,
+        action: PushAction,
+    ) -> RepoSyncResult {
+        match action {
+            PushAction::Skip => RepoSyncResult::Skipped {
+                repo_name: repo_name.to_string(),
+                reason: "up to date".to_string(),
+            },
+            PushAction::Inject { .. } => {
+                match self.inject(session, repo_name, host_path, target_branch).await {
+                    Ok(()) => RepoSyncResult::Pushed { repo_name: repo_name.to_string() },
+                    Err(e) => RepoSyncResult::Failed { repo_name: repo_name.to_string(), error: e.to_string() },
+                }
+            }
+            PushAction::PushToContainer => {
+                match self.inject(session, repo_name, host_path, target_branch).await {
+                    Ok(()) => RepoSyncResult::Pushed { repo_name: repo_name.to_string() },
+                    Err(e) => RepoSyncResult::Failed { repo_name: repo_name.to_string(), error: e.to_string() },
+                }
+            }
+            PushAction::Blocked(reason) => RepoSyncResult::Skipped {
+                repo_name: repo_name.to_string(),
+                reason: format!("blocked: {}", reason),
+            },
+        }
+    }
+
+    /// Dispatch a single PullAction — typed, no string direction.
+    async fn dispatch_pull(
+        &self,
+        session: &SessionName,
+        repo_name: &str,
+        host_path: &Path,
+        session_branch: &str,
+        target_branch: &str,
+        action: PullAction,
+    ) -> RepoSyncResult {
+        match action {
+            PullAction::Skip => RepoSyncResult::Skipped {
+                repo_name: repo_name.to_string(),
+                reason: "up to date".to_string(),
+            },
+            PullAction::Extract { .. } => {
+                match self.execute_pull_one(session, repo_name, host_path, session_branch, target_branch).await {
+                    Ok(r) => r,
+                    Err(e) => RepoSyncResult::Failed { repo_name: repo_name.to_string(), error: e.to_string() },
+                }
+            }
+            PullAction::CloneToHost => {
+                match self.extract(session, repo_name, host_path, session_branch).await {
+                    Ok(extract) => RepoSyncResult::ClonedToHost { repo_name: repo_name.to_string(), extract },
+                    Err(e) => RepoSyncResult::Failed { repo_name: repo_name.to_string(), error: e.to_string() },
+                }
+            }
+            PullAction::MergeToTarget { .. } => {
+                match self.merge(host_path, session_branch, target_branch, true) {
+                    Ok(merge) => {
+                        if let MergeOutcome::Conflict { files } = &merge {
+                            RepoSyncResult::Conflicted { repo_name: repo_name.to_string(), files: files.clone() }
+                        } else {
+                            RepoSyncResult::Merged { repo_name: repo_name.to_string(), merge }
+                        }
+                    }
+                    Err(e) => RepoSyncResult::Failed { repo_name: repo_name.to_string(), error: e.to_string() },
+                }
+            }
+            PullAction::Reconcile => {
+                // inject host → container, then extract + merge back
+                match self.inject(session, repo_name, host_path, target_branch).await {
+                    Ok(()) => {
+                        match self.execute_pull_one(session, repo_name, host_path, session_branch, target_branch).await {
+                            Ok(r) => r,
+                            Err(e) => RepoSyncResult::Failed {
+                                repo_name: repo_name.to_string(),
+                                error: format!("reconcile pull phase failed: {}", e),
+                            },
+                        }
+                    }
+                    Err(e) => RepoSyncResult::Failed {
+                        repo_name: repo_name.to_string(),
+                        error: format!("reconcile inject phase failed: {}", e),
+                    },
+                }
+            }
+            PullAction::Blocked(reason) => RepoSyncResult::Skipped {
+                repo_name: repo_name.to_string(),
+                reason: format!("blocked: {}", reason),
+            },
+        }
     }
 
     // ========================================================================
     // Internal: execute a pull (extract + merge) for one repo
     // ========================================================================
 
-    async fn execute_pull(
+    async fn execute_pull_one(
         &self,
         session: &SessionName,
         repo_name: &str,

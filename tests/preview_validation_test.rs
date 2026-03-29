@@ -5,7 +5,6 @@ use git_sandbox::lifecycle::Lifecycle;
 use git_sandbox::session::SessionManager;
 use git_sandbox::sync::SyncEngine;
 use git_sandbox::types::*;
-use git_sandbox::types::git::*;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -69,7 +68,7 @@ async fn test_identical_repos_have_matching_heads() {
     let plan = engine.plan_sync(&session, "main", &repo_paths).await.unwrap();
 
     for action in &plan.action.repo_actions {
-        if matches!(action.decision, SyncDecision::Skip { reason: SkipReason::Identical }) {
+        if !action.state.has_work() {
             // Verify this repo's session branch HEAD matches container HEAD
             // by checking that the host repo's session branch exists and points
             // to a known commit
@@ -111,8 +110,8 @@ async fn test_blocked_repos_have_real_blockers() {
     let plan = engine.plan_sync(&session, "main", &repo_paths).await.unwrap();
 
     for action in &plan.action.repo_actions {
-        match &action.decision {
-            SyncDecision::Blocked { reason: BlockReason::HostDirty } => {
+        match &action.state.blocker {
+            Some(Blocker::HostDirty) => {
                 // Verify the host repo actually has uncommitted changes
                 let path = repo_paths.get(&action.repo_name).expect("repo should be in config");
                 if path.join(".git").exists() {
@@ -125,10 +124,10 @@ async fn test_blocked_repos_have_real_blockers() {
                     );
                 }
             }
-            SyncDecision::Blocked { reason: BlockReason::ContainerDirty(n) } => {
+            Some(Blocker::ContainerDirty(n)) => {
                 assert!(*n > 0, "{} marked ContainerDirty but n=0", action.repo_name);
             }
-            _ => {} // other decisions not validated here
+            _ => {} // other states not validated here
         }
     }
 }
@@ -157,9 +156,9 @@ async fn test_plan_counts_consistent() {
     let reconciles = plan.action.reconciles().len();
     let blocked = plan.action.blocked().len();
     let clone_to_host = plan.action.repo_actions.iter()
-        .filter(|a| matches!(a.decision, SyncDecision::CloneToHost)).count();
+        .filter(|a| matches!(a.state.pull_action(), PullAction::CloneToHost)).count();
     let push_to_container = plan.action.repo_actions.iter()
-        .filter(|a| matches!(a.decision, SyncDecision::PushToContainer)).count();
+        .filter(|a| matches!(a.state.push_action(), PushAction::PushToContainer)).count();
 
     let sum = skips + pulls + pushes + reconciles + blocked + clone_to_host + push_to_container;
     assert_eq!(
@@ -203,8 +202,8 @@ async fn test_render_sync_plan_for_review() {
 
     // Print detailed breakdown for each non-skip repo
     for action in &plan.action.repo_actions {
-        if !matches!(action.decision, SyncDecision::Skip { .. }) {
-            println!("  {} → {:?}", action.repo_name, action.decision);
+        if action.state.has_work() {
+            println!("  {} → pull:{:?} push:{:?}", action.repo_name, action.state.pull_action(), action.state.push_action());
             if let Some(ref diff) = action.outbound_diff {
                 println!("    outbound: {}", diff);
             }

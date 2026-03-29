@@ -213,9 +213,10 @@ pub(crate) async fn cmd_pull(name: &SessionName, branch: &str, filter: Option<&s
     // Phase 1: Quick preview
     let (lc, engine, initial_plan, repo_paths) = build_sync_plan(name, branch, filter, include_deps).await?;
 
-    let has_work = initial_plan.action.repo_actions.iter().any(|a| !matches!(a.decision, SyncDecision::Skip { .. }));
+    let has_work = initial_plan.action.repo_actions.iter()
+        .any(|a| a.state.has_work());
     let has_extractable = initial_plan.action.repo_actions.iter()
-        .any(|a| matches!(a.decision, SyncDecision::Pull { .. } | SyncDecision::CloneToHost | SyncDecision::Reconcile { .. }));
+        .any(|a| matches!(a.state.pull_action(), PullAction::Extract { .. } | PullAction::CloneToHost | PullAction::Reconcile));
 
     render::sync_plan_directed(&initial_plan.action, "pull");
 
@@ -225,8 +226,8 @@ pub(crate) async fn cmd_pull(name: &SessionName, branch: &str, filter: Option<&s
 
     use std::io::Write;
 
-    // Phase 2: Extract ALL repos first
-    if has_extractable {
+    // Phase 2: Extract repos that need it, then re-plan with accurate trial merge data
+    let plan = if has_extractable {
         let session_branch = name.to_string();
         let spinner = indicatif::ProgressBar::new_spinner();
         spinner.set_style(indicatif::ProgressStyle::default_spinner()
@@ -235,7 +236,7 @@ pub(crate) async fn cmd_pull(name: &SessionName, branch: &str, filter: Option<&s
         spinner.enable_steady_tick(std::time::Duration::from_millis(80));
 
         for action in &initial_plan.action.repo_actions {
-            if matches!(action.decision, SyncDecision::Skip { .. } | SyncDecision::MergeToTarget { .. }) {
+            if !matches!(action.state.pull_action(), PullAction::Extract { .. } | PullAction::CloneToHost | PullAction::Reconcile) {
                 continue;
             }
             if let Some(host_path) = repo_paths.get(&action.repo_name) {
@@ -244,10 +245,15 @@ pub(crate) async fn cmd_pull(name: &SessionName, branch: &str, filter: Option<&s
             }
         }
         spinner.finish_and_clear();
-    }
 
-    // Phase 3: Re-plan with accurate data
-    let (_lc2, _engine2, plan, _repo_paths2) = build_sync_plan(name, branch, filter, include_deps).await?;
+        // Re-plan now that we have the commits on host for accurate trial merges
+        let (_lc2, _engine2, plan, _repo_paths2) = build_sync_plan(name, branch, filter, include_deps).await?;
+        render::sync_plan_directed(&plan.action, "pull");
+        plan
+    } else {
+        // No extraction needed — initial plan is already accurate
+        initial_plan
+    };
 
     struct PendingMergeInfo {
         repo_name: String,
@@ -256,7 +262,7 @@ pub(crate) async fn cmd_pull(name: &SessionName, branch: &str, filter: Option<&s
         conflict_files: Vec<String>,
     }
     let pending_merge_repos: Vec<PendingMergeInfo> = plan.action.repo_actions.iter()
-        .filter(|a| matches!(a.decision, SyncDecision::MergeToTarget { .. }))
+        .filter(|a| matches!(a.state.pull_action(), PullAction::MergeToTarget { .. }))
         .filter_map(|a| {
             a.host_path.clone().map(|p| {
                 let has_conflict = a.trial_conflicts.as_ref().map_or(false, |f| !f.is_empty());
@@ -273,10 +279,10 @@ pub(crate) async fn cmd_pull(name: &SessionName, branch: &str, filter: Option<&s
         conflict_files: Vec<String>,
     }
     let diverged_repos: Vec<DivergedInfo> = plan.action.repo_actions.iter()
-        .filter(|a| matches!(a.decision, SyncDecision::Reconcile { .. }))
+        .filter(|a| matches!(a.state.pull_action(), PullAction::Reconcile))
         .map(|a| {
-            let (ca, ha) = match &a.decision {
-                SyncDecision::Reconcile { container_ahead, host_ahead } => (*container_ahead, *host_ahead),
+            let (ca, ha) = match &a.state.extraction {
+                LegState::Diverged { container_ahead, session_ahead } => (*container_ahead, *session_ahead),
                 _ => (0, 0),
             };
             let has_conflict = a.trial_conflicts.as_ref().map_or(false, |f| !f.is_empty());
@@ -284,11 +290,6 @@ pub(crate) async fn cmd_pull(name: &SessionName, branch: &str, filter: Option<&s
             DivergedInfo { repo_name: a.repo_name.clone(), container_ahead: ca, host_ahead: ha, has_conflict, conflict_files }
         })
         .collect();
-
-    if !pending_merge_repos.is_empty() || !diverged_repos.is_empty() {
-        eprintln!();
-        render::sync_plan_directed(&plan.action, "pull");
-    }
 
     let (clean_merges, conflict_merges): (Vec<_>, Vec<_>) = pending_merge_repos.iter()
         .partition(|m| !m.has_conflict);

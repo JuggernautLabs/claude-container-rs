@@ -296,8 +296,12 @@ pub fn restore_terminal() {
     // 1. Disable crossterm raw mode (safe even if never enabled)
     let _ = terminal::disable_raw_mode();
 
-    // 2. Show cursor + disable mouse tracking + disable bracketed paste + disable focus events
-    // Claude Code enables these for its TUI; we must undo them on detach
+    // 2. Show cursor + disable mouse/paste/focus
+    // Claude Code enables these for its TUI; we must undo them on detach.
+    // NOTE: we do NOT send \x1b[?1049l (leave alternate screen) here because
+    // restore_terminal() is called on every startup as a safety measure —
+    // leaving the alternate screen on every invocation would cause visible
+    // garbage. The alternate screen escape is sent only in detach_from_session().
     print!(concat!(
         "\x1b[?25h",     // show cursor
         "\x1b[?1000l",   // disable mouse click tracking
@@ -352,7 +356,7 @@ struct RawModeGuard {
 impl RawModeGuard {
     fn enable() -> Result<Self, ContainerError> {
         // Check if we have a TTY before enabling raw mode
-        if !atty_stdout() {
+        if !is_tty() {
             return Ok(Self { was_enabled: false });
         }
         terminal::enable_raw_mode()
@@ -369,16 +373,10 @@ impl Drop for RawModeGuard {
     }
 }
 
-/// Check if stdout is a TTY (without pulling in a full crate).
-fn atty_stdout() -> bool {
-    #[cfg(unix)]
-    {
-        unsafe { libc::isatty(libc::STDOUT_FILENO) != 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        false
-    }
+/// Check if stdout is a TTY.
+pub fn is_tty() -> bool {
+    use crossterm::tty::IsTty;
+    std::io::stdout().is_tty()
 }
 
 /// Get the current terminal size, or a sensible default.
@@ -790,6 +788,10 @@ async fn attach_container(
 
     // _raw_guard drops here, but we also call restore_terminal() explicitly
     // to cover the panic case (Drop may not run if panic=abort).
+    // Leave alternate screen first (only appropriate after interactive session,
+    // not in the generic restore_terminal() which runs on every startup).
+    print!("\x1b[?1049l");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
     restore_terminal();
 
     // Print appropriate exit message based on how we exited
@@ -806,6 +808,154 @@ async fn attach_container(
             eprintln!("\r\n→ Internal error during attach (panic caught). Terminal restored.");
         }
     }
+
+    Ok(())
+}
+
+// ============================================================================
+// Interactive exec — run a command with a TTY inside a running container
+// ============================================================================
+
+/// Run an interactive command (e.g. bash) inside a running container.
+/// Bridges stdin/stdout with raw mode, resize handling, Ctrl-Z detach.
+/// The exec session ends when the command exits.
+pub async fn exec_interactive(
+    lc: &Lifecycle,
+    container_name: &ContainerName,
+    command: &[String],
+    as_root: bool,
+) -> Result<(), ContainerError> {
+    let docker = lc.docker_client();
+
+    let user = if as_root { "root" } else { "developer" };
+    let cmd: Vec<String> = if command.is_empty() {
+        vec!["bash".to_string()]
+    } else {
+        command.to_vec()
+    };
+
+    // Create exec with TTY + stdin
+    let exec = docker.create_exec(
+        container_name.as_str(),
+        bollard::exec::CreateExecOptions {
+            cmd: Some(cmd),
+            attach_stdin: Some(true),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            tty: Some(true),
+            user: Some(user.to_string()),
+            ..Default::default()
+        },
+    ).await?;
+
+    let exec_id = exec.id.clone();
+
+    // Resize exec TTY to match host terminal
+    let (cols, rows) = terminal_size();
+    let _ = docker.resize_exec(
+        &exec_id,
+        bollard::exec::ResizeExecOptions {
+            width: cols,
+            height: rows,
+        },
+    ).await;
+
+    // Start exec attached
+    let start_result = docker.start_exec(
+        &exec_id,
+        Some(bollard::exec::StartExecOptions { tty: true, ..Default::default() }),
+    ).await?;
+
+    let (mut output, mut input) = match start_result {
+        bollard::exec::StartExecResults::Attached { output, input } => (output, input),
+        bollard::exec::StartExecResults::Detached => {
+            return Ok(()); // shouldn't happen with tty
+        }
+    };
+
+    // Enable raw mode
+    let _raw_guard = RawModeGuard::enable()?;
+
+    // Stdin forwarding — Ctrl-Z detaches, everything else forwarded
+    let detach_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let detach_flag_clone = detach_flag.clone();
+    let ctr_name = container_name.to_string();
+    let stdin_handle = tokio::spawn(async move {
+        let mut stdin = tokio::io::stdin();
+        let mut buf = [0u8; 4096];
+        loop {
+            match stdin.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    if buf[..n].contains(&0x1a) {
+                        detach_flag_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                        restore_terminal();
+                        eprintln!("\r\n→ Detached from exec on {}.", ctr_name);
+                        break;
+                    }
+                    if input.write_all(&buf[..n]).await.is_err() { break; }
+                    if input.flush().await.is_err() { break; }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // SIGWINCH resize for exec
+    let docker_for_resize = docker.clone();
+    let exec_id_for_resize = exec_id.clone();
+    let resize_handle = tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            use signal_hook::consts::SIGWINCH;
+            use signal_hook_tokio::Signals;
+
+            let mut signals = match Signals::new([SIGWINCH]) {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+
+            while let Some(_sig) = signals.next().await {
+                let (cols, rows) = terminal::size().unwrap_or((80, 24));
+                let _ = docker_for_resize.resize_exec(
+                    &exec_id_for_resize,
+                    bollard::exec::ResizeExecOptions {
+                        width: cols,
+                        height: rows,
+                    },
+                ).await;
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = (docker_for_resize, exec_id_for_resize);
+            std::future::pending::<()>().await;
+        }
+    });
+
+    // Suppress SIGINT during interactive session
+    let _ = ctrlc::set_handler(move || {});
+
+    // Output forwarding
+    {
+        let mut stdout = tokio::io::stdout();
+        while let Some(result) = output.next().await {
+            match result {
+                Ok(log) => {
+                    let bytes = log.into_bytes();
+                    if stdout.write_all(&bytes).await.is_err() { break; }
+                    if stdout.flush().await.is_err() { break; }
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    // Cleanup
+    stdin_handle.abort();
+    resize_handle.abort();
+    restore_terminal();
 
     Ok(())
 }
@@ -858,7 +1008,7 @@ pub async fn run_headless(
             lc.create_container(&container_name, &ready.image.image, args).await?;
         }
         LaunchTarget::Rebuild(confirmed) => {
-            eprintln!("  Rebuilding container ({})...", confirmed.description);
+            eprintln!("  Rebuilding container...");
             lc.remove_container(&container_name).await?;
             lc.create_container(&container_name, &ready.image.image, args).await?;
         }
@@ -1001,7 +1151,7 @@ pub async fn launch(
         }
 
         LaunchTarget::Rebuild(confirmed) => {
-            eprintln!("  Rebuilding container ({})...", confirmed.description);
+            eprintln!("  Rebuilding container...");
             // Remove the old container
             lc.remove_container(&container_name).await?;
             // Create fresh
