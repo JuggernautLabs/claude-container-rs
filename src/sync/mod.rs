@@ -302,6 +302,14 @@ impl SyncEngine {
                     });
                     (None, diff)
                 }
+                // Blocked but has container + host heads → compute diff for force-push preview
+                _ if state.blocker.is_some() => {
+                    let diff = pair.host.head().and_then(|h_head| {
+                        pair.container.head()
+                            .and_then(|c_head| self.compute_diff(&host_path, c_head, h_head))
+                    });
+                    (None, diff)
+                }
                 _ => (None, None),
             };
 
@@ -1242,7 +1250,12 @@ git config --global --add safe.directory "*"
 cd "/session/{repo_name}" || exit 1
 git remote add _cc_upstream "/upstream" 2>/dev/null || git remote set-url _cc_upstream "/upstream"
 git fetch _cc_upstream "{branch}" || exit 1
-git merge "_cc_upstream/{branch}" --no-edit || exit 1
+if ! git merge "_cc_upstream/{branch}" --no-edit 2>&1; then
+    echo "MERGE_CONFLICT"
+    git merge --abort 2>/dev/null || true
+    git remote remove _cc_upstream 2>/dev/null
+    exit 1
+fi
 git remote remove _cc_upstream 2>/dev/null
 "#,
             repo_name = repo_name,
@@ -1317,6 +1330,12 @@ git remote remove _cc_upstream 2>/dev/null
         ).await;
 
         if exit_code != 0 {
+            if log_output.contains("MERGE_CONFLICT") {
+                return Err(ContainerError::MergeConflict {
+                    repo: repo_name.to_string(),
+                    files: vec![], // conflict was aborted, no file list available
+                });
+            }
             return Err(ContainerError::InjectionFailed {
                 repo: repo_name.to_string(),
                 reason: format!(
@@ -1328,6 +1347,117 @@ git remote remove _cc_upstream 2>/dev/null
         }
 
         Ok(())
+    }
+
+    // ========================================================================
+    // Force inject: hard-reset container to match host branch
+    // ========================================================================
+
+    /// Force-inject: discard container changes and reset to match the host branch.
+    /// Used by `push --force` for repos that are blocked (dirty, merging, etc.).
+    /// Runs `git fetch + git reset --hard + git clean -fd` in the container.
+    async fn force_inject(
+        &self,
+        session: &SessionName,
+        repo_name: &str,
+        host_path: &Path,
+        branch: &str,
+    ) -> RepoSyncResult {
+        let volume_name = session.session_volume();
+        let container_name = format!("cc-force-inject-{}-{}", session, rand_suffix());
+        let _ = self.docker.remove_container(
+            &container_name,
+            Some(RemoveContainerOptions { force: true, ..Default::default() }),
+        ).await;
+
+        let host_path_str = host_path.to_string_lossy().to_string();
+
+        let script = format!(
+            r#"
+git config --global --add safe.directory "*"
+cd "/session/{repo_name}" || exit 1
+git merge --abort 2>/dev/null || true
+git remote remove _cc_upstream 2>/dev/null || true
+git remote add _cc_upstream "/upstream" 2>/dev/null || git remote set-url _cc_upstream "/upstream"
+git fetch _cc_upstream "{branch}" || exit 1
+git reset --hard "_cc_upstream/{branch}" || exit 1
+git clean -fd 2>/dev/null || true
+git remote remove _cc_upstream 2>/dev/null
+"#,
+            repo_name = repo_name,
+            branch = branch,
+        );
+
+        use crate::types::docker::{throwaway_config, VolumeMount, RunAs};
+        let config = throwaway_config(
+            GIT_UTIL_IMAGE,
+            &script,
+            &[
+                VolumeMount::Writable { source: volume_name.to_string(), target: "/session".into() },
+                VolumeMount::ReadOnly { source: host_path_str, target: "/upstream".into() },
+            ],
+            &RunAs::developer(),
+            session,
+        );
+
+        let opts = CreateContainerOptions {
+            name: container_name.as_str(),
+            platform: None,
+        };
+
+        if let Err(e) = self.docker.create_container(Some(opts), config).await {
+            return RepoSyncResult::Failed {
+                repo_name: repo_name.to_string(),
+                error: format!("force-inject: {}", e),
+            };
+        }
+
+        if let Err(e) = self.docker.start_container(
+            &container_name,
+            None::<StartContainerOptions<String>>,
+        ).await {
+            return RepoSyncResult::Failed {
+                repo_name: repo_name.to_string(),
+                error: format!("force-inject: {}", e),
+            };
+        }
+
+        let mut wait_stream = self.docker
+            .wait_container(&container_name, None::<WaitContainerOptions<String>>);
+        let mut exit_code: i64 = -1;
+        while let Some(result) = wait_stream.next().await {
+            match result {
+                Ok(resp) => { exit_code = resp.status_code; }
+                Err(e) => {
+                    let _ = self.docker.remove_container(
+                        &container_name,
+                        Some(RemoveContainerOptions { force: true, ..Default::default() }),
+                    ).await;
+                    return RepoSyncResult::Failed {
+                        repo_name: repo_name.to_string(),
+                        error: format!("force-inject: {}", e),
+                    };
+                }
+            }
+        }
+
+        let _ = self.docker.remove_container(
+            &container_name,
+            Some(RemoveContainerOptions { force: true, ..Default::default() }),
+        ).await;
+
+        if exit_code != 0 {
+            return RepoSyncResult::Failed {
+                repo_name: repo_name.to_string(),
+                error: format!("force-inject exited with code {}", exit_code),
+            };
+        }
+
+        // Re-extract so session branch reflects the reset state
+        let session_branch = session.to_string();
+        let _ = self.extract(session, repo_name, host_path, &session_branch).await;
+
+        RepoSyncResult::Pushed { repo_name: repo_name.to_string() }
     }
 
     // ========================================================================
@@ -1521,6 +1651,17 @@ fi
         plan: SessionSyncPlan,
         repo_configs: &BTreeMap<String, PathBuf>,
     ) -> Result<SyncResult, ContainerError> {
+        self.execute_push_with_force(session, plan, repo_configs, false).await
+    }
+
+    /// Execute push actions, with optional force (hard-reset blocked repos).
+    pub async fn execute_push_with_force(
+        &self,
+        session: &SessionName,
+        plan: SessionSyncPlan,
+        repo_configs: &BTreeMap<String, PathBuf>,
+        force: bool,
+    ) -> Result<SyncResult, ContainerError> {
         let target_branch = plan.target_branch.clone();
         let mut results = Vec::new();
 
@@ -1536,6 +1677,14 @@ fi
                     continue;
                 }
             };
+
+            // Force: blocked repos get hard-reset to match the host branch
+            if force && matches!(push, PushAction::Blocked(_)) {
+                let result = self.force_inject(session, &action.repo_name, &host_path, &target_branch).await;
+                results.push(result);
+                continue;
+            }
+
             let result = self.dispatch_push(session, &action.repo_name, &host_path, &target_branch, push).await;
             results.push(result);
         }
@@ -1559,13 +1708,23 @@ fi
             },
             PushAction::Inject { .. } => {
                 match self.inject(session, repo_name, host_path, target_branch).await {
-                    Ok(()) => RepoSyncResult::Pushed { repo_name: repo_name.to_string() },
+                    Ok(()) => {
+                        // Re-extract so session branch reflects container's new state.
+                        // Without this, next plan sees session behind target → phantom work.
+                        let session_branch = session.to_string();
+                        let _ = self.extract(session, repo_name, host_path, &session_branch).await;
+                        RepoSyncResult::Pushed { repo_name: repo_name.to_string() }
+                    }
                     Err(e) => RepoSyncResult::Failed { repo_name: repo_name.to_string(), error: e.to_string() },
                 }
             }
             PushAction::PushToContainer => {
                 match self.inject(session, repo_name, host_path, target_branch).await {
-                    Ok(()) => RepoSyncResult::Pushed { repo_name: repo_name.to_string() },
+                    Ok(()) => {
+                        let session_branch = session.to_string();
+                        let _ = self.extract(session, repo_name, host_path, &session_branch).await;
+                        RepoSyncResult::Pushed { repo_name: repo_name.to_string() }
+                    }
                     Err(e) => RepoSyncResult::Failed { repo_name: repo_name.to_string(), error: e.to_string() },
                 }
             }
