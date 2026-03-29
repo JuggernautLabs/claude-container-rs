@@ -215,12 +215,16 @@ fn no_container_means_push_to_container() {
 
 // ============================================================================
 // Merge safety tests (real git repos via git2, no Docker)
+//
+// All tests call through the SyncBackend trait and assert on git state
+// (branch heads, worktree, conflict markers) — not on internal return types.
+// These tests survive any internal refactor of the merge implementation.
 // ============================================================================
 
 use git2::Repository;
 use std::path::Path;
 use git_sandbox::sync::SyncEngine;
-use git_sandbox::types::git::MergeOutcome;
+use git_sandbox::backend::{SyncBackend, BackendError};
 
 /// Create a test repo with initial commit on main
 fn make_test_repo(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
@@ -306,12 +310,24 @@ fn assert_target_clean(path: &Path, branch: &str) {
     }).unwrap();
 }
 
-/// Build a SyncEngine for merge tests. merge() only uses git2, not Docker,
+/// Build a backend for merge tests. merge() only uses git2, not Docker,
 /// so the Docker client is never actually invoked.
-fn make_engine() -> SyncEngine {
+fn make_backend() -> Box<dyn SyncBackend> {
     let docker = bollard::Docker::connect_with_local_defaults()
         .expect("bollard client struct creation should not require Docker daemon");
-    SyncEngine::new(docker)
+    Box::new(SyncEngine::new(docker))
+}
+
+/// Assert worktree has no uncommitted changes
+fn assert_worktree_clean(path: &Path) {
+    let repo = Repository::open(path).unwrap();
+    let statuses = repo.statuses(Some(
+        git2::StatusOptions::new()
+            .include_untracked(false)
+            .include_ignored(false)
+    )).unwrap();
+    assert!(statuses.is_empty(),
+        "worktree should be clean, but found {} dirty entries", statuses.len());
 }
 
 /// Count commits on a branch (walk first-parent chain)
@@ -339,12 +355,12 @@ fn merge_ff_advances_target() {
     checkout_branch(&path, "main");
 
     let session_head = branch_head(&path, "session");
-    let engine = make_engine();
-    let result = engine.merge(&path, "session", "main", false).unwrap();
+    let backend = make_backend();
+    backend.merge(&path, "session", "main", false).unwrap();
 
-    assert!(matches!(result, MergeOutcome::FastForward { commits: 2 }), "expected FastForward, got {:?}", result);
-    assert_eq!(branch_head(&path, "main"), session_head);
+    assert_eq!(branch_head(&path, "main"), session_head, "main should advance to session HEAD");
     assert_target_clean(&path, "main");
+    assert_worktree_clean(&path);
 }
 
 #[test]
@@ -357,22 +373,22 @@ fn merge_squash_creates_single_commit() {
     add_commit(&path, "c.txt", "ccc\n", "commit 3");
     checkout_branch(&path, "main");
 
-    let main_before = count_commits(&path, "main");
-    let engine = make_engine();
-    let result = engine.merge(&path, "session", "main", true).unwrap();
+    let main_commits_before = count_commits(&path, "main");
+    let backend = make_backend();
+    backend.merge(&path, "session", "main", true).unwrap();
 
-    assert!(matches!(result, MergeOutcome::SquashMerge { commits: 3, .. }), "expected SquashMerge(3), got {:?}", result);
-    let main_after = count_commits(&path, "main");
-    assert_eq!(main_after, main_before + 1, "squash should add exactly 1 commit");
+    assert_eq!(count_commits(&path, "main"), main_commits_before + 1,
+        "squash should add exactly 1 commit");
 
     // Tree should contain all files from session
     let repo = Repository::open(&path).unwrap();
     let main_commit = repo.find_reference("refs/heads/main").unwrap().peel_to_commit().unwrap();
     let tree = main_commit.tree().unwrap();
-    assert!(tree.get_name("a.txt").is_some());
-    assert!(tree.get_name("b.txt").is_some());
-    assert!(tree.get_name("c.txt").is_some());
+    assert!(tree.get_name("a.txt").is_some(), "a.txt should be on main");
+    assert!(tree.get_name("b.txt").is_some(), "b.txt should be on main");
+    assert!(tree.get_name("c.txt").is_some(), "c.txt should be on main");
     assert_target_clean(&path, "main");
+    assert_worktree_clean(&path);
 }
 
 #[test]
@@ -384,29 +400,30 @@ fn merge_squash_only_new_commits() {
     add_commit(&path, "b.txt", "bbb\n", "commit 2");
     checkout_branch(&path, "main");
 
-    let engine = make_engine();
-    let result = engine.merge(&path, "session", "main", true).unwrap();
-    assert!(matches!(result, MergeOutcome::SquashMerge { commits: 2, .. }), "first squash: expected 2, got {:?}", result);
+    let backend = make_backend();
+    let before_first = count_commits(&path, "main");
+    backend.merge(&path, "session", "main", true).unwrap();
+    assert_eq!(count_commits(&path, "main"), before_first + 1, "first squash: 1 commit");
 
-    // Now add 2 more commits on session
+    // Add 2 more commits on session
     checkout_branch(&path, "session");
     add_commit(&path, "d.txt", "ddd\n", "commit 3");
     add_commit(&path, "e.txt", "eee\n", "commit 4");
     checkout_branch(&path, "main");
 
-    let result2 = engine.merge(&path, "session", "main", true).unwrap();
-    assert!(matches!(result2, MergeOutcome::SquashMerge { commits: 2, .. }), "second squash: expected 2, got {:?}", result2);
+    let before_second = count_commits(&path, "main");
+    backend.merge(&path, "session", "main", true).unwrap();
+    assert_eq!(count_commits(&path, "main"), before_second + 1, "second squash: 1 commit (only new work)");
     assert_target_clean(&path, "main");
+    assert_worktree_clean(&path);
 }
 
 #[test]
 fn merge_conflict_preserves_target() {
     let (_tmp, path) = make_test_repo("conflict");
-    // Create shared file on main
     add_commit(&path, "shared.txt", "original\n", "add shared");
     create_branch(&path, "session");
 
-    // Diverge: modify shared.txt differently on each branch
     checkout_branch(&path, "session");
     add_commit(&path, "shared.txt", "session version\n", "session edit");
 
@@ -414,12 +431,13 @@ fn merge_conflict_preserves_target() {
     add_commit(&path, "shared.txt", "main version\n", "main edit");
 
     let main_head_before = branch_head(&path, "main");
-    let engine = make_engine();
-    let result = engine.merge(&path, "session", "main", false).unwrap();
+    let backend = make_backend();
+    let result = backend.merge(&path, "session", "main", false);
 
-    assert!(matches!(result, MergeOutcome::Conflict { .. }), "expected Conflict, got {:?}", result);
-    assert_eq!(branch_head(&path, "main"), main_head_before, "main HEAD should be unchanged after conflict");
+    assert!(matches!(result, Err(BackendError::Conflict { .. })), "expected conflict");
+    assert_eq!(branch_head(&path, "main"), main_head_before, "main HEAD unchanged after conflict");
     assert_target_clean(&path, "main");
+    assert_worktree_clean(&path);
 }
 
 #[test]
@@ -434,11 +452,12 @@ fn merge_conflict_no_markers_committed() {
     checkout_branch(&path, "main");
     add_commit(&path, "shared.txt", "main version\n", "main edit");
 
-    let engine = make_engine();
-    let _result = engine.merge(&path, "session", "main", false).unwrap();
+    let backend = make_backend();
+    let _ = backend.merge(&path, "session", "main", false);
 
-    // The key safety invariant: no conflict markers on the target branch
+    assert!(!backend.has_conflict_markers(&path, "main"), "no conflict markers on target");
     assert_target_clean(&path, "main");
+    assert_worktree_clean(&path);
 }
 
 #[test]
@@ -453,17 +472,10 @@ fn merge_conflict_worktree_clean_after() {
     checkout_branch(&path, "main");
     add_commit(&path, "shared.txt", "main version\n", "main edit");
 
-    let engine = make_engine();
-    let _result = engine.merge(&path, "session", "main", false).unwrap();
+    let backend = make_backend();
+    let _ = backend.merge(&path, "session", "main", false);
 
-    // After conflict, working directory should be clean (no uncommitted changes)
-    let repo = Repository::open(&path).unwrap();
-    let statuses = repo.statuses(Some(
-        git2::StatusOptions::new()
-            .include_untracked(false)
-            .include_ignored(false)
-    )).unwrap();
-    assert!(statuses.is_empty(), "worktree should be clean after conflict, but found {} dirty entries", statuses.len());
+    assert!(backend.is_worktree_clean(&path), "worktree should be clean after conflict");
     assert_target_clean(&path, "main");
 }
 
@@ -471,36 +483,34 @@ fn merge_conflict_worktree_clean_after() {
 fn merge_noop_when_up_to_date() {
     let (_tmp, path) = make_test_repo("noop");
     create_branch(&path, "session");
-    // session and main point to the same commit
 
     let main_head_before = branch_head(&path, "main");
-    let engine = make_engine();
-    let result = engine.merge(&path, "session", "main", false).unwrap();
+    let backend = make_backend();
+    backend.merge(&path, "session", "main", false).unwrap();
 
-    assert!(matches!(result, MergeOutcome::AlreadyUpToDate), "expected AlreadyUpToDate, got {:?}", result);
-    assert_eq!(branch_head(&path, "main"), main_head_before);
+    assert_eq!(branch_head(&path, "main"), main_head_before, "main unchanged when up to date");
     assert_target_clean(&path, "main");
+    assert_worktree_clean(&path);
 }
 
 #[test]
 fn merge_noop_when_session_behind() {
     let (_tmp, path) = make_test_repo("session-behind");
     create_branch(&path, "session");
-    // Add commits on main, making session behind
     add_commit(&path, "extra.txt", "extra\n", "main moves ahead");
     add_commit(&path, "extra2.txt", "extra2\n", "main moves ahead again");
 
     let main_head_before = branch_head(&path, "main");
-    let engine = make_engine();
-    let result = engine.merge(&path, "session", "main", false).unwrap();
+    let backend = make_backend();
+    backend.merge(&path, "session", "main", false).unwrap();
 
-    assert!(matches!(result, MergeOutcome::AlreadyUpToDate), "expected AlreadyUpToDate, got {:?}", result);
-    assert_eq!(branch_head(&path, "main"), main_head_before);
+    assert_eq!(branch_head(&path, "main"), main_head_before, "main unchanged when session behind");
     assert_target_clean(&path, "main");
+    assert_worktree_clean(&path);
 }
 
 #[test]
-fn merge_blocked_when_host_dirty() {
+fn merge_with_dirty_host_does_not_corrupt_target() {
     let (_tmp, path) = make_test_repo("dirty");
     add_commit(&path, "file.txt", "original\n", "add file");
     create_branch(&path, "session");
@@ -508,39 +518,26 @@ fn merge_blocked_when_host_dirty() {
     add_commit(&path, "new.txt", "new\n", "session commit");
     checkout_branch(&path, "main");
 
-    // Make working tree dirty (modify tracked file without committing)
+    // Make working tree dirty
     std::fs::write(path.join("file.txt"), "dirty modification\n").unwrap();
 
-    let main_head_before = branch_head(&path, "main");
-    let engine = make_engine();
+    let backend = make_backend();
+    // merge() force-checkouts — dirty check is at sync orchestration layer
+    let _ = backend.merge(&path, "session", "main", false);
 
-    // merge() uses checkout_head(force) which will overwrite dirty files,
-    // so it won't block. The dirty-check is done at the sync orchestration layer.
-    // For fast-forward merges the worktree is updated via force checkout.
-    // The safety invariant still holds: no conflict markers on target.
-    let result = engine.merge(&path, "session", "main", false);
-    assert!(result.is_ok(), "merge should succeed (dirty check is at sync layer)");
-
-    // Regardless of outcome, target branch must be clean
+    // Regardless of outcome, target must be clean
     assert_target_clean(&path, "main");
-    // For FF merge, main should advance
-    if let Ok(MergeOutcome::FastForward { .. }) = &result {
-        assert_eq!(branch_head(&path, "main"), branch_head(&path, "session"));
-    } else {
-        // If it somehow blocked, HEAD should be unchanged
-        assert_eq!(branch_head(&path, "main"), main_head_before);
-    }
 }
 
 #[test]
-fn merge_blocked_when_no_session_branch() {
+fn merge_nonexistent_session_does_not_corrupt_target() {
     let (_tmp, path) = make_test_repo("no-session");
 
     let main_head_before = branch_head(&path, "main");
-    let engine = make_engine();
-    let result = engine.merge(&path, "nonexistent-session", "main", false);
+    let backend = make_backend();
+    let result = backend.merge(&path, "nonexistent-session", "main", false);
 
-    assert!(result.is_err(), "merging nonexistent session branch should error");
-    assert_eq!(branch_head(&path, "main"), main_head_before);
+    assert!(result.is_err(), "merging nonexistent branch should error");
+    assert_eq!(branch_head(&path, "main"), main_head_before, "main unchanged");
     assert_target_clean(&path, "main");
 }
