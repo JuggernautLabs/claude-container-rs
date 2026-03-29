@@ -1,100 +1,60 @@
-# OPS-1.5: Verify inject works end-to-end
+# OPS-1.5: Verify inject works end-to-end + idempotency
 
 blocked_by: []
 unlocks: [OPS-2]
 
-## Problem
+## Status: COMPLETE
 
-During live testing of the two-leg state model, `git-sandbox push`
-reported success ("squash-merge 9 commit(s)") but the container HEAD
-did not change (stayed at 280e53a). Running push again showed the
-same work pending with +1 commit.
+All acceptance criteria met. Changes shipped in v0.3.0.
 
-Two possible causes:
+## What was fixed
 
-1. **Dispatch was wrong (fixed).** The old combined_action logic
-   picked MergeToTarget (host-side merge) instead of Inject
-   (container-side push). Fixed by typed `execute_push()` which
-   only dispatches `PushAction`. The result message "squash-merge"
-   confirmed it was merging on host, not injecting into container.
+### 1. Dispatch bug (the original squash-push issue)
+`execute_sync` had a combined_action that preferred pull over push.
+`MergeToTarget` won over `Inject`, so push did a host-side merge
+instead of a container-side inject. Fixed by typed `execute_push()`
+which only dispatches `PushAction` (4 variants, can't merge).
 
-2. **Inject itself is broken.** Even with correct dispatch, the
-   `inject()` function may be failing silently. The throwaway
-   container runs a merge script that could fail without surfacing
-   the error properly. OPS-3 fixes cleanup, but the inject may
-   have a more fundamental issue.
+### 2. Inject idempotency
+After inject, session branch wasn't re-extracted. Next push still
+showed work because session was stale. Fixed: `dispatch_push` now
+re-extracts after successful inject to sync the session branch.
 
-## Verification steps
+### 3. Host dirty doesn't block push
+Push reads a committed ref, not the worktree. `push_action()` no
+longer returns `Blocked` for `HostDirty` or `HostNotARepo` — only
+container-side blockers (dirty, merging, rebasing) block push.
 
-### Step 1: Manual test with current binary
+### 4. Force push
+`--force` flag added. Blocked repos (dirty container, merge in
+progress) get `git fetch + git reset --hard + git clean -fd` instead
+of being skipped. Force targets show diff preview (what will change).
 
-```bash
-# Pick a session with a repo where target is ahead of container
-git-sandbox push -s <session> <branch> --filter '<repo>'
+### 5. Default branch
+Push defaults to session name as branch (not main). Override with
+positional arg: `git-sandbox push -s http-gateway main`.
 
-# Check the hash output:
-#   container:<hash1>  session:<hash1>  main:<hash2>
-# hash1 != hash2 means there's work to push
+### 6. Blocked repo diffs
+Blocked repos now show commit hashes and diff summary in the plan
+view, so you can see what force-reset would change before confirming.
 
-# Execute the push, then immediately check:
-git-sandbox push -s <session> <branch> --filter '<repo>'
+## Other fixes made during this work
 
-# If container hash changed → inject works, old bug was dispatch only
-# If container hash unchanged → inject is broken
-```
+- Unicode truncation panic in build log UI (byte slicing → char slicing)
+- Terminal width-adaptive build log (reads `crossterm::terminal::size()`)
+- `curl install.sh | sh` → `| bash` (Claude installer has bashisms)
+- Claude install verification (fail loudly, not silently continue)
+- Bash existence check before entrypoint (clear error on missing bash)
+- Terminal restore on container error (keys no longer eaten)
+- Log replay on container resume (entrypoint output visible)
+- Podman compatibility (`X-Registry-Config` header fix)
 
-### Step 2: If inject is broken, diagnose
+## Acceptance criteria — all met
 
-Run inject in isolation with verbose output:
-
-```bash
-# Snapshot before
-git-sandbox status -s <session> <branch> --filter '<repo>'
-
-# Run inject with RUST_LOG=debug
-RUST_LOG=debug git-sandbox push -s <session> <branch> --filter '<repo>'
-
-# Check container logs from the throwaway container
-# The inject script is:
-#   git remote add _cc_upstream /upstream
-#   git fetch _cc_upstream <branch>
-#   git merge _cc_upstream/<branch> --no-edit
-#   git remote remove _cc_upstream
-```
-
-Possible failure points:
-- `/upstream` mount not reaching the right host path
-- `git fetch` failing (host branch not accessible from container)
-- `git merge` failing (conflict, dirty worktree from prior failed inject)
-- Container exit code not being checked properly
-- Merge succeeds but on wrong branch (not HEAD)
-
-### Step 3: Fix whatever is found
-
-If dispatch-only (already fixed): document, move on to OPS-2.
-
-If inject script: fix the script in sync/mod.rs `inject()` method
-(lines ~1240-1250). Common fixes:
-- Add error checking per command (`set -e` or `|| exit 1` per step)
-- Ensure merge targets HEAD explicitly (`git merge ... HEAD`)
-- Clean up prior state before attempting (`git merge --abort 2>/dev/null; git remote remove _cc_upstream 2>/dev/null`)
-
-If mount issue: check that `inject()` mounts the host repo at
-`/upstream` and the session volume at `/workspace`.
-
-### Step 4: Confirm with second push
-
-After fix, push should be idempotent:
-```bash
-git-sandbox push -s <session> <branch> --filter '<repo>'
-# → "1 ready, inject N commit(s)"
-# Execute
-git-sandbox push -s <session> <branch> --filter '<repo>'
-# → "Nothing to push" or "0 ready, N unchanged"
-```
-
-## Acceptance criteria
-
-- Push with `PushAction::Inject` actually changes container HEAD
-- Second push after successful first shows no work remaining
-- inject() failure produces a visible error (not silent success)
+- Push with `PushAction::Inject` actually changes container HEAD ✓
+- After successful inject, session branch updated via re-extract ✓
+- Second push after successful first shows no work remaining ✓
+- inject() failure produces a visible error (not silent success) ✓
+- Re-extract failure after inject does not fail the push ✓
+- Host dirty does not block push ✓
+- `--force` resets blocked repos to match host branch ✓

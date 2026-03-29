@@ -96,7 +96,7 @@ enum Commands {
     Push {
         #[arg(short, long)]
         session: String,
-        /// Source branch (default: main)
+        /// Source branch (default: session name)
         branch: Option<String>,
         /// Filter repos by regex
         #[arg(short, long)]
@@ -106,6 +106,9 @@ enum Commands {
         all: bool,
         #[arg(long)]
         dry_run: bool,
+        /// Force: reset container to match host branch (discards container changes)
+        #[arg(long)]
+        force: bool,
         /// Merge strategy
         #[arg(long, value_enum)]
         strategy: Option<PushStrategy>,
@@ -349,9 +352,9 @@ async fn main() -> anyhow::Result<()> {
                 cmd_extract(&name, filter.as_deref(), dry_run, auto_yes).await?;
             }
         }
-        Commands::Push { session, branch, filter, all, dry_run, .. } => {
+        Commands::Push { session, branch, filter, all, dry_run, force, .. } => {
             let name = SessionName::new(&session);
-            cmd_push(&name, &branch.unwrap_or("main".into()), filter.as_deref(), all, dry_run, auto_yes).await?;
+            cmd_push(&name, &branch.unwrap_or(session.clone()), filter.as_deref(), all, dry_run, auto_yes, force).await?;
         }
     }
 

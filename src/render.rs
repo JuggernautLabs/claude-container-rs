@@ -286,6 +286,10 @@ fn sync_plan_inner(plan: &SessionSyncPlan, label: &str, direction: &str) {
                 None => "blocked".into(),
             };
             println!("    {} {} ({})", "!".yellow(), display_name(action), reason);
+            render_hash_line(action, &plan.target_branch);
+            if let Some(ref diff) = action.inbound_diff {
+                println!("      {}", format!("{}", diff).dimmed());
+            }
         }
     }
 

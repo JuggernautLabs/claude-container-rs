@@ -300,7 +300,9 @@ pub(crate) async fn verify_and_launch(
     eprintln!();
     use std::io::Write;
     std::io::stderr().flush().ok();
-    container::launch(lc, ready, name, &script_dir, launch_opts).await?;
+    let launch_result = container::launch(lc, ready, name, &script_dir, launch_opts).await;
+    container::restore_terminal(); // safety: always restore even on error
+    launch_result?;
     Ok(())
 }
 

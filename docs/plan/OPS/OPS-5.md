@@ -1,7 +1,12 @@
 # OPS-5: Cleanup — Partial Clone Leaves Stale Directory
 
 blocked_by: []
-unlocks: [OPS-6]
+unlocks: [VM-2]
+
+## Status: COMPLETE (uncommitted, pending commit after current HEAD 3db9d43)
+
+Clone script pre-cleans stale directories and removes partial clones
+on failure. Retry after failed clone works.
 
 ## Bug
 

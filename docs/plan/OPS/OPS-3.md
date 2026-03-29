@@ -1,7 +1,9 @@
 # OPS-3: Cleanup — Inject Failure Leaves Container Dirty
 
 blocked_by: []
-unlocks: [OPS-6]
+unlocks: [VM-2]
+
+## Status: COMPLETE (landed in 3db9d43, partially earlier in OPS-1.5 work)
 
 ## Bug
 

@@ -485,9 +485,18 @@ impl RepoState {
     }
 
     /// Derive what push (host→container) should do.
+    /// Push reads a committed branch ref, not the worktree — so host dirty
+    /// doesn't block. Only container-side blockers matter (container needs
+    /// to be clean to accept a merge).
     pub fn push_action(&self) -> PushAction {
         if let Some(ref b) = self.blocker {
-            return PushAction::Blocked(b.clone());
+            match b {
+                Blocker::ContainerDirty(_) | Blocker::ContainerMerging | Blocker::ContainerRebasing => {
+                    return PushAction::Blocked(b.clone());
+                }
+                // Host dirty/not-a-repo doesn't block push — we read a ref, not the worktree
+                Blocker::HostDirty | Blocker::HostNotARepo(_) => {}
+            }
         }
         match &self.merge {
             MergeLeg::TargetAhead { commits, .. } => PushAction::Inject { commits: *commits },

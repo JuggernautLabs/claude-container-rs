@@ -1,34 +1,29 @@
 # OPS-1: Sync Safety Foundation — Epic
 
-## Status
+## Status: COMPLETE
 
-OPS-2 through OPS-5 are active. OPS-6 through OPS-11 are superseded
-by the VM epic (docs/plan/VM/). The compound Op enum + interpreter
-is skipped — we go straight from cleanup fixes to primitive-level VM.
+All active tickets done. OPS-6 through OPS-11 superseded by VM epic.
 
-## What's here
+Current HEAD: 3db9d43 (committed work)
+Uncommitted: OPS-2 tests, OPS-4 MergeGuard, OPS-5 clone cleanup,
+plus OPS-1.5 fixes (force push, host-dirty, terminal restore, etc.)
+
+## Tickets
 
 | Ticket | Title | Status |
 |--------|-------|--------|
-| OPS-1.5 | Verify inject works end-to-end | Active — do first |
-| OPS-2 | Test foundation: derivation + merge safety | Active |
-| OPS-3 | Cleanup: inject failure leaves container dirty | Active |
-| OPS-4 | Cleanup: merge crash leaves host dirty | Active |
-| OPS-5 | Cleanup: partial clone leaves stale directory | Active |
+| OPS-1.5 | Verify inject + idempotency + force push | **DONE** |
+| OPS-2 | Test foundation: 29 scenario + merge safety tests | **DONE** |
+| OPS-3 | Cleanup: inject failure (merge abort + remote remove) | **DONE** (3db9d43) |
+| OPS-4 | Cleanup: MergeGuard Drop for host safety | **DONE** (uncommitted) |
+| OPS-5 | Cleanup: clone pre-clean + failure cleanup | **DONE** (uncommitted) |
 | OPS-6–11 | Compound Op enum, interpreter, migration | **Superseded by VM** |
 
-## Execution order
+## What's next
 
 ```
-OPS-1.5 (verify inject works — do first, may reveal real bug)
+VM-1.5 (Backend trait skeleton, rewrite tests against it)
   │
-OPS-2  (test foundation — pin behavior)
-  │
-OPS-3 ── OPS-4 ── OPS-5  (cleanup fixes — parallel)
-  │
-VM-2   (primitive VM types — see docs/plan/VM/VM-1.md)
-VM-3+  (mock backend, generators, real backend, migration)
+VM-2  (12 primitive ops, RepoVM, SyncVM)
+VM-3+ (mock backend, generators, real backend, migration)
 ```
-
-OPS-2 through OPS-5 are Phase 0 and Phase 1 of the VM plan.
-After they land, work continues in the VM epic.

@@ -1,7 +1,13 @@
 # OPS-4: Cleanup — Merge Crash Leaves Host Dirty
 
 blocked_by: []
-unlocks: [OPS-6]
+unlocks: [VM-2]
+
+## Status: COMPLETE (uncommitted, pending commit after current HEAD 3db9d43)
+
+MergeGuard struct added with Drop impl. Armed before set_head,
+disarmed after successful commit+ref update. Both squash and regular
+merge paths guarded.
 
 ## Bug
 

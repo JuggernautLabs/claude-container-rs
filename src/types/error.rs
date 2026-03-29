@@ -10,6 +10,9 @@ pub enum ContainerError {
     #[error("Docker not available: {0}")]
     DockerUnavailable(String),
 
+    #[error("Image build failed: {0}")]
+    ImageBuildFailed(String),
+
     #[error("Image not found: {0}")]
     ImageNotFound(ImageRef),
 

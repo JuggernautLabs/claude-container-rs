@@ -98,6 +98,64 @@ pub enum ContainerCheck {
 }
 
 // ============================================================================
+// Docker socket discovery (no CLI dependency)
+// ============================================================================
+
+/// Discover Docker socket by reading context config files directly.
+/// Priority: DOCKER_HOST env → active Docker context → None (bollard defaults).
+///
+/// Reads ~/.docker/config.json for the active context name, then scans
+/// ~/.docker/contexts/meta/<hash>/meta.json to find the socket path.
+/// No subprocess calls — pure filesystem reads.
+fn discover_docker_host() -> Option<String> {
+    // 1. DOCKER_HOST env takes priority
+    if let Ok(host) = std::env::var("DOCKER_HOST") {
+        if !host.is_empty() {
+            return Some(host);
+        }
+    }
+
+    // 2. Read active Docker context from ~/.docker/config.json
+    let home = dirs::home_dir()?;
+    let docker_dir = home.join(".docker");
+    let config_path = docker_dir.join("config.json");
+    let config_str = std::fs::read_to_string(&config_path).ok()?;
+
+    // Extract "currentContext": "..." from config.json
+    let ctx_name = config_str
+        .split("\"currentContext\"")
+        .nth(1)?
+        .split('"')
+        .nth(1)?;
+
+    if ctx_name == "default" {
+        return None; // use bollard default (/var/run/docker.sock)
+    }
+
+    // 3. Scan context metadata dirs for matching context name
+    let meta_dir = docker_dir.join("contexts").join("meta");
+    let entries = std::fs::read_dir(&meta_dir).ok()?;
+    for entry in entries.flatten() {
+        let meta_path = entry.path().join("meta.json");
+        if let Ok(meta_str) = std::fs::read_to_string(&meta_path) {
+            let name_match = format!("\"Name\":\"{}\"", ctx_name);
+            if meta_str.contains(&name_match) {
+                // Extract Host from Endpoints.docker.Host
+                if let Some(host) = meta_str
+                    .split("\"Host\":\"")
+                    .nth(1)
+                    .and_then(|s| s.split('"').next())
+                {
+                    return Some(host.to_string());
+                }
+            }
+        }
+    }
+
+    None
+}
+
+// ============================================================================
 // Lifecycle
 // ============================================================================
 
@@ -107,24 +165,47 @@ pub struct Lifecycle {
 
 impl Lifecycle {
     /// Connect to the local Docker daemon.
-    /// Uses DOCKER_HOST if set, otherwise queries `docker context inspect`
-    /// for the active context's endpoint (works with Colima, Docker Desktop, etc.)
+    /// Priority: DOCKER_HOST env → Docker context config files → bollard defaults.
+    /// Reads ~/.docker/config.json + context meta.json directly (no CLI dependency).
+    ///
+    /// Terminates with a clear error if connection fails — no silent fallthrough.
     pub fn new() -> Result<Self> {
-        if std::env::var("DOCKER_HOST").is_err() {
-            // Ask docker CLI what socket it would use
-            if let Ok(output) = std::process::Command::new("docker")
-                .args(["context", "inspect", "--format", "{{.Endpoints.docker.Host}}"])
-                .output()
-            {
-                let host = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !host.is_empty() && host.starts_with("unix://") {
-                    std::env::set_var("DOCKER_HOST", &host);
-                }
+        let (docker, _source) = match discover_docker_host() {
+            Some(host) => {
+                let sock_path = host.strip_prefix("unix://").unwrap_or(&host);
+                let d = Docker::connect_with_unix(sock_path, 120, bollard::API_DEFAULT_VERSION)
+                    .map_err(|e| ContainerError::DockerUnavailable(format!(
+                        "Cannot connect to Docker at {}\n\
+                         \n\
+                         The socket was discovered from ~/.docker/config.json (context config).\n\
+                         Error: {}\n\
+                         \n\
+                         Check:\n\
+                         - Is Docker or Colima running?\n\
+                         - Does the socket file exist? (ls -la {})\n\
+                         - Try: DOCKER_HOST=unix://<path> git-sandbox <command>",
+                        host, e, sock_path
+                    )))?;
+                (d, host)
             }
-        }
-
-        let docker = Docker::connect_with_local_defaults()
-            .map_err(|e| ContainerError::DockerUnavailable(e.to_string()))?;
+            None => {
+                let d = Docker::connect_with_local_defaults()
+                    .map_err(|e| ContainerError::DockerUnavailable(format!(
+                        "Cannot connect to Docker\n\
+                         \n\
+                         No DOCKER_HOST set and no active Docker context found in\n\
+                         ~/.docker/config.json. Falling back to /var/run/docker.sock.\n\
+                         Error: {}\n\
+                         \n\
+                         Check:\n\
+                         - Is Docker or Colima running?\n\
+                         - Set DOCKER_HOST=unix://<socket-path> explicitly\n\
+                         - Or configure a Docker context: docker context create ...",
+                        e
+                    )))?;
+                (d, "/var/run/docker.sock".to_string())
+            }
+        };
         Ok(Self { docker })
     }
 
@@ -389,44 +470,42 @@ impl Lifecycle {
             ..Default::default()
         };
 
+        // Pass empty credentials map instead of None. Podman's API rejects
+        // the X-Registry-Config header bollard sends when credentials are None
+        // (malformed empty JSON). An empty HashMap produces valid JSON "{}".
+        let credentials = std::collections::HashMap::new();
         let mut stream = self.docker.build_image(
             options,
-            None,
+            Some(credentials),
             Some(tar_bytes.into()),
         );
 
         let mut last_id = None;
+        let mut step_count = 0u32;
+        let mut recent_lines: Vec<String> = Vec::new();
+        const TAIL: usize = 6;
 
-        let spinner = indicatif::ProgressBar::new_spinner();
-        spinner.set_style(
+        // Single progress bar whose message IS the scrolling log window.
+        // indicatif redraws the entire message on each set_message, handling
+        // cursor positioning and cleanup automatically.
+        let pb = indicatif::ProgressBar::new_spinner();
+        pb.set_style(
             indicatif::ProgressStyle::default_spinner()
                 .template("  {spinner:.blue} {msg}")
                 .unwrap()
                 .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
         );
-        spinner.enable_steady_tick(std::time::Duration::from_millis(80));
-        spinner.set_message("Building image...");
-
-        let mut step_count = 0u32;
-        let mut recent_lines: Vec<String> = Vec::new(); // rolling buffer of build output
-        const MAX_RECENT: usize = 30;
+        pb.enable_steady_tick(std::time::Duration::from_millis(80));
+        pb.set_message("Building...");
 
         while let Some(result) = stream.next().await {
             match result {
                 Ok(info) => {
                     if let Some(ref error) = info.error {
-                        spinner.finish_and_clear();
-                        eprintln!("  {} Build failed", "✗");
-                        eprintln!();
-                        // Show recent build output for context
-                        for line in &recent_lines {
-                            eprintln!("    {}", line);
-                        }
-                        eprintln!();
-                        eprintln!("  Error: {}", error);
-                        return Err(ContainerError::DockerUnavailable(format!(
-                            "Build failed: {}", error
-                        )));
+                        pb.finish_and_clear();
+                        eprintln!("  ✗ Build failed: {}", error);
+                        check_build_context_hint(dockerfile, &recent_lines, name);
+                        return Err(ContainerError::ImageBuildFailed(error.clone()));
                     }
                     if let Some(ref id) = info.id {
                         last_id = Some(id.clone());
@@ -438,48 +517,34 @@ impl Lifecycle {
                             if line.starts_with("Step ") {
                                 step_count += 1;
                             }
-                            // Keep rolling buffer
                             recent_lines.push(line.to_string());
-                            if recent_lines.len() > MAX_RECENT {
-                                recent_lines.remove(0);
-                            }
-                            spinner.set_message(line.chars().take(72).collect::<String>());
+                            pb.set_message(build_log_message(&recent_lines, step_count, TAIL));
                         }
                     }
-                    // Also capture error_detail from the build info
                     if let Some(ref detail) = info.error_detail {
                         if let Some(ref msg) = detail.message {
                             recent_lines.push(format!("ERROR: {}", msg));
+                            pb.set_message(build_log_message(&recent_lines, step_count, TAIL));
                         }
                     }
                 }
                 Err(e) => {
-                    spinner.finish_and_clear();
-                    eprintln!("  {} Build failed", "✗");
+                    pb.finish_and_clear();
+                    let last_step = recent_lines.iter().rev()
+                        .find(|l| l.starts_with("Step "))
+                        .cloned()
+                        .unwrap_or_else(|| "unknown step".to_string());
+                    eprintln!("  ✗ Build failed at: {}", last_step);
+                    eprintln!("  Error: {}", e);
                     eprintln!();
-                    for line in &recent_lines {
-                        eprintln!("    {}", line);
-                    }
-                    eprintln!();
-                    // Extract useful info from the bollard error
-                    let err_str = format!("{:?}", e); // Debug format has more info
-                    let display_str = format!("{}", e);
-                    if display_str.contains("stream error") || display_str.contains("Docker responded with") {
-                        eprintln!("  Error: build failed at the step above.");
-                        eprintln!("  To debug, build manually:");
-                        eprintln!("    docker build -t {} -f {} {}",
-                            name.as_str(),
-                            dockerfile.display(),
-                            context.display(),
-                        );
-                    } else {
-                        eprintln!("  Error: {}", display_str);
-                    }
-                    return Err(ContainerError::DockerUnavailable(format!("Image build failed: {}", display_str)));
+                    check_build_context_hint(dockerfile, &recent_lines, name);
+                    return Err(ContainerError::ImageBuildFailed(format!(
+                        "{} — {}", last_step, e
+                    )));
                 }
             }
         }
-        spinner.finish_and_clear();
+        pb.finish_and_clear();
         if step_count > 0 {
             eprintln!("  ✓ Built ({} steps)", step_count);
         }
@@ -1092,13 +1157,194 @@ pub fn validation_cache_path(image_id: &str) -> Option<PathBuf> {
     )
 }
 
-/// Create a tar archive of the build context for `docker build`.
+// ============================================================================
+// Build log scrolling display
+// ============================================================================
+
+/// Build the progress bar message: header + last N lines of build output.
+/// Line width adapts to current terminal size on each call.
+fn build_log_message(lines: &[String], step_count: u32, tail: usize) -> String {
+    let term_width = crossterm::terminal::size()
+        .map(|(cols, _)| cols as usize)
+        .unwrap_or(80);
+    // 4 chars indent + 2 chars margin
+    let line_width = term_width.saturating_sub(6).max(20);
+
+    let header = if step_count > 0 {
+        format!("Building (step {})", step_count)
+    } else {
+        "Building...".to_string()
+    };
+
+    let start = lines.len().saturating_sub(tail);
+    let mut msg = header;
+    for line in &lines[start..] {
+        msg.push_str("\n    ");
+        msg.push_str(&truncate_line(line, line_width));
+    }
+    msg
+}
+
+/// Check if the failure was due to missing --build-context and print guidance.
+fn check_build_context_hint(dockerfile: &Path, lines: &[String], name: &ImageRef) {
+    let last_step = lines.iter().rev()
+        .find(|l| l.starts_with("Step "))
+        .cloned().unwrap_or_default();
+    let needs_contexts = last_step.contains("COPY --from=")
+        || lines.iter().any(|l| l.contains("COPY failed") && l.contains("--from"));
+
+    if !needs_contexts { return; }
+
+    let build_contexts = parse_build_contexts(dockerfile);
+    if build_contexts.is_empty() { return; }
+
+    // Extract the specific name that failed from the last step
+    let failed_name = last_step
+        .split("COPY --from=").nth(1)
+        .and_then(|s| s.split_whitespace().next())
+        .unwrap_or("?");
+
+    eprintln!("  Cause: '{}' is not a build stage in this Dockerfile.", failed_name);
+    eprintln!("  It's an external build context (a sibling directory) that Docker");
+    eprintln!("  needs to be told about with --build-context flags.");
+    eprintln!();
+    eprintln!("  git-sandbox doesn't pass --build-context yet, so build manually:");
+    eprintln!();
+    let ctx_args: String = build_contexts.iter()
+        .map(|c| format!("    --build-context {}=../{} \\", c, c))
+        .collect::<Vec<_>>()
+        .join("\n");
+    eprintln!("    cd {} && docker buildx build \\", dockerfile.parent().map(|p| p.display().to_string()).unwrap_or(".".into()));
+    eprintln!("{}", ctx_args);
+    eprintln!("    -t {} .", name.as_str());
+    eprintln!();
+    eprintln!("  Then start with the pre-built image:");
+    eprintln!("    git-sandbox start -s <session> --image {}", name.as_str());
+}
+
+/// Parse a Dockerfile for COPY --from=<name> references that aren't
+/// defined as build stages (FROM ... AS <name>). These require
+/// --build-context arguments.
+fn parse_build_contexts(dockerfile: &Path) -> Vec<String> {
+    let content = match std::fs::read_to_string(dockerfile) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    // Collect stage names (FROM ... AS <name>)
+    let stages: Vec<String> = content.lines()
+        .filter_map(|line| {
+            let line = line.trim().to_uppercase();
+            if line.starts_with("FROM ") && line.contains(" AS ") {
+                line.split(" AS ").nth(1).map(|s| s.trim().to_lowercase())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Collect COPY --from=<name> references not in stages
+    let mut contexts: Vec<String> = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("COPY --from=") {
+            let name = rest.split_whitespace().next().unwrap_or("")
+                .trim().to_lowercase();
+            if !name.is_empty()
+                && !stages.contains(&name)
+                && name.parse::<u32>().is_err() // not a numeric stage index
+                && !contexts.contains(&name)
+            {
+                contexts.push(name);
+            }
+        }
+    }
+    contexts
+}
+
+fn truncate_line(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{}…", truncated)
+    }
+}
+
+// ============================================================================
+// Build context tar creation
+// ============================================================================
+
+/// Maximum build context size (200 MB). Beyond this, the build will almost
+/// certainly fail or be painfully slow. We error early with guidance.
+const MAX_CONTEXT_BYTES: u64 = 200 * 1024 * 1024;
+
+/// Directories always excluded from build context (like .git).
+/// These are heavy, never needed in a Docker build, and cause
+/// multi-GB context uploads if included.
+const ALWAYS_EXCLUDE_DIRS: &[&str] = &[
+    ".git",
+    "target",         // Rust
+    "node_modules",   // JS
+    "__pycache__",    // Python
+    ".mypy_cache",
+    ".pytest_cache",
+    "dist",           // various build outputs
+    ".next",          // Next.js
+    ".nuxt",          // Nuxt.js
+    ".tox",           // Python tox
+    "vendor",         // Go (when not needed)
+];
+
 fn create_build_tar(dockerfile: &Path, context: &Path) -> Result<Vec<u8>> {
+    // Load .dockerignore patterns if present
+    let dockerignore_patterns = load_dockerignore(context);
+
+    // Estimate context size before building tar
+    let (file_count, total_bytes) = estimate_context_size(context, &dockerignore_patterns);
+    if total_bytes > MAX_CONTEXT_BYTES {
+        let size_mb = total_bytes / (1024 * 1024);
+        let has_dockerignore = context.join(".dockerignore").exists();
+
+        let mut msg = format!(
+            "Build context is too large ({} MB, {} files)\n\
+             \n\
+             Context directory: {}\n",
+            size_mb, file_count, context.display()
+        );
+
+        if !has_dockerignore {
+            msg.push_str(&format!(
+                "\n\
+                 No .dockerignore found. Create one to exclude build artifacts:\n\
+                 \n\
+                     echo 'target/\\nnode_modules/\\n.git/' > {}/.dockerignore\n\
+                 \n\
+                 Or build the image manually and use --image:\n\
+                 \n\
+                     docker build -t <name> -f {} {}\n\
+                     git-sandbox start --session <name> --image <name>\n",
+                context.display(), dockerfile.display(), context.display()
+            ));
+        } else {
+            msg.push_str(&format!(
+                "\n\
+                 .dockerignore exists but the context is still large.\n\
+                 Add more exclusions or build manually:\n\
+                 \n\
+                     docker build -t <name> -f {} {}\n\
+                     git-sandbox start --session <name> --image <name>\n",
+                dockerfile.display(), context.display()
+            ));
+        }
+
+        return Err(ContainerError::ImageBuildFailed(msg));
+    }
+
     let buf: Vec<u8> = Vec::new();
     let mut archive = tar::Builder::new(buf);
 
-    // Walk the context directory and add files
-    add_dir_to_tar(&mut archive, context, context)?;
+    add_dir_to_tar(&mut archive, context, context, &dockerignore_patterns)?;
 
     // If the Dockerfile is outside the context dir, add it explicitly
     if !dockerfile.starts_with(context) {
@@ -1114,10 +1360,97 @@ fn create_build_tar(dockerfile: &Path, context: &Path) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// Load .dockerignore patterns. Returns empty vec if no file exists.
+fn load_dockerignore(context: &Path) -> Vec<String> {
+    let path = context.join(".dockerignore");
+    match std::fs::read_to_string(&path) {
+        Ok(content) => content
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Check if a path should be excluded from build context.
+fn is_excluded(relative: &Path, dockerignore: &[String]) -> bool {
+    let rel_str = relative.to_string_lossy();
+
+    // Always-excluded directories
+    for component in relative.components() {
+        let name = component.as_os_str().to_string_lossy();
+        if ALWAYS_EXCLUDE_DIRS.iter().any(|&d| d == name.as_ref()) {
+            return true;
+        }
+    }
+
+    // .dockerignore patterns (simple prefix/suffix matching)
+    for pattern in dockerignore {
+        let pat = pattern.trim_end_matches('/');
+        // "target" or "target/" matches directory name at any level
+        if relative.components().any(|c| c.as_os_str().to_string_lossy() == pat) {
+            return true;
+        }
+        // "*.log" matches file extension
+        if pat.starts_with('*') {
+            let suffix = &pat[1..];
+            if rel_str.ends_with(suffix) {
+                return true;
+            }
+        }
+        // Direct prefix match
+        if rel_str.starts_with(pat) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Estimate total size of build context (respecting exclusions).
+fn estimate_context_size(context: &Path, dockerignore: &[String]) -> (u64, u64) {
+    let mut file_count = 0u64;
+    let mut total_bytes = 0u64;
+    estimate_dir_size(context, context, dockerignore, &mut file_count, &mut total_bytes);
+    (file_count, total_bytes)
+}
+
+fn estimate_dir_size(
+    dir: &Path,
+    base: &Path,
+    dockerignore: &[String],
+    file_count: &mut u64,
+    total_bytes: &mut u64,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let relative = path.strip_prefix(base).unwrap_or(&path);
+
+        if is_excluded(relative, dockerignore) {
+            continue;
+        }
+
+        if path.is_dir() {
+            estimate_dir_size(&path, base, dockerignore, file_count, total_bytes);
+        } else if path.is_file() {
+            if let Ok(meta) = path.metadata() {
+                *file_count += 1;
+                *total_bytes += meta.len();
+            }
+        }
+    }
+}
+
 fn add_dir_to_tar(
     builder: &mut tar::Builder<Vec<u8>>,
     dir: &Path,
     base: &Path,
+    dockerignore: &[String],
 ) -> std::io::Result<()> {
     if dir.is_dir() {
         for entry in std::fs::read_dir(dir)? {
@@ -1125,16 +1458,12 @@ fn add_dir_to_tar(
             let path = entry.path();
             let relative = path.strip_prefix(base).unwrap_or(&path);
 
-            // Skip .git directories
-            if relative
-                .components()
-                .any(|c| c.as_os_str() == ".git")
-            {
+            if is_excluded(relative, dockerignore) {
                 continue;
             }
 
             if path.is_dir() {
-                add_dir_to_tar(builder, &path, base)?;
+                add_dir_to_tar(builder, &path, base, dockerignore)?;
             } else if path.is_file() {
                 builder.append_path_with_name(&path, relative)?;
             }

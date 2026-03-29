@@ -173,7 +173,7 @@ fn build_create_args(
         cmd: Some(vec![
             "/bin/bash".to_string(),
             "-c".to_string(),
-            "chmod +x /usr/local/bin/cc-entrypoint /usr/local/bin/cc-developer-setup /usr/local/bin/cc-agent-run 2>/dev/null; exec /usr/local/bin/cc-entrypoint".to_string(),
+            "chmod +x /usr/local/bin/cc-entrypoint /usr/local/bin/cc-developer-setup /usr/local/bin/cc-agent-run 2>/dev/null; if ! command -v bash >/dev/null 2>&1; then echo 'ERROR: bash is required but not found in this image.' >&2; echo '  Install bash in your Dockerfile: RUN apt-get install -y bash' >&2; echo '  Or use the base image: FROM ghcr.io/hypermemetic/claude-container:latest' >&2; exit 1; fi; exec /usr/local/bin/cc-entrypoint".to_string(),
         ]),
         ..Default::default()
     };
@@ -1145,7 +1145,8 @@ pub async fn launch(
                 }
                 _ => {
                     // Container still running after 1s — it's alive, attach
-                    attach_container(lc, &resumable.name, false).await?;
+                    // Replay logs from startup so we don't miss entrypoint output
+                    attach_container(lc, &resumable.name, true).await?;
                 }
             }
         }
@@ -1162,5 +1163,7 @@ pub async fn launch(
         }
     }
 
+    // Safety: always restore terminal in case attach didn't clean up
+    restore_terminal();
     Ok(())
 }

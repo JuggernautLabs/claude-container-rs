@@ -860,6 +860,28 @@ echo "BUNDLE_OK"
             return Ok(MergeOutcome::FastForward { commits: ff_count });
         }
 
+        // MergeGuard: ensures cleanup on any error/panic after we enter merge state.
+        // Drop calls cleanup_state + checkout_head(force) to restore worktree.
+        // Disarmed on success so cleanup only runs on failure paths.
+        struct MergeGuard<'a> {
+            repo: &'a Repository,
+            armed: bool,
+        }
+        impl<'a> MergeGuard<'a> {
+            fn new(repo: &'a Repository) -> Self { Self { repo, armed: true } }
+            fn disarm(&mut self) { self.armed = false; }
+        }
+        impl Drop for MergeGuard<'_> {
+            fn drop(&mut self) {
+                if self.armed {
+                    let _ = self.repo.cleanup_state();
+                    let _ = self.repo.checkout_head(Some(
+                        git2::build::CheckoutBuilder::new().force()
+                    ));
+                }
+            }
+        }
+
         // Squash merge
         if squash {
             // Determine the effective base for squash
@@ -904,6 +926,9 @@ echo "BUNDLE_OK"
                 return Ok(MergeOutcome::AlreadyUpToDate);
             }
 
+            // Guard: cleanup on any error after entering merge state
+            let mut guard = MergeGuard::new(&repo);
+
             // Checkout target branch
             repo.set_head(&target_ref_name)?;
             repo.checkout_head(Some(
@@ -915,7 +940,7 @@ echo "BUNDLE_OK"
             let mut merge_opts = git2::MergeOptions::new();
             repo.merge(&[&annotated], Some(&mut merge_opts), None)?;
 
-            // Check for conflicts
+            // Check for conflicts — guard handles cleanup if we return early
             let index = repo.index()?;
             if index.has_conflicts() {
                 let conflict_files: Vec<String> = index
@@ -929,9 +954,8 @@ echo "BUNDLE_OK"
                     })
                     .collect();
 
-                // Clean up: clear merge state AND restore working tree to pre-merge state.
-                // Without checkout_head, conflict markers stay in the working tree
-                // and every subsequent check sees "host has uncommitted changes."
+                // Guard will cleanup on drop, but do it explicitly for the conflict return
+                guard.disarm();
                 repo.cleanup_state()?;
                 repo.checkout_head(Some(
                     git2::build::CheckoutBuilder::new().force(),
@@ -974,7 +998,8 @@ echo "BUNDLE_OK"
                 "cc: update squash-base",
             )?;
 
-            // Clean up merge state
+            // Success — disarm guard, cleanup merge state
+            guard.disarm();
             repo.cleanup_state()?;
 
             return Ok(MergeOutcome::SquashMerge {
@@ -984,6 +1009,8 @@ echo "BUNDLE_OK"
         }
 
         // Regular merge (non-ff, non-squash)
+        let mut guard = MergeGuard::new(&repo);
+
         // Checkout target branch
         repo.set_head(&target_ref_name)?;
         repo.checkout_head(Some(
@@ -1007,6 +1034,7 @@ echo "BUNDLE_OK"
                 })
                 .collect();
 
+            guard.disarm();
             repo.cleanup_state()?;
             repo.checkout_head(Some(
                 git2::build::CheckoutBuilder::new().force(),
@@ -1041,6 +1069,7 @@ echo "BUNDLE_OK"
         let new_head = repo.head()?.peel_to_commit()?.id();
         repo.reference(&target_ref_name, new_head, true, "cc: merge commit")?;
 
+        guard.disarm();
         repo.cleanup_state()?;
 
         Ok(MergeOutcome::CleanMerge)
@@ -1091,7 +1120,14 @@ echo "BUNDLE_OK"
             r#"
 export HOME=/tmp
 git config --global --add safe.directory "*"
-git clone {branch_flag} "/upstream" "/session/{repo_name}" || exit 1
+# Pre-clean stale directory from prior failed clone
+[ -d "/session/{repo_name}" ] && rm -rf "/session/{repo_name}"
+git clone {branch_flag} "/upstream" "/session/{repo_name}"
+clone_rc=$?
+if [ $clone_rc -ne 0 ]; then
+    rm -rf "/session/{repo_name}"
+    exit $clone_rc
+fi
 chown -R {uid}:{gid} "/session/{repo_name}" 2>/dev/null || true
 cd "/session/{repo_name}" || exit 1
 echo "Cloned $(git rev-parse --short HEAD) on $(git symbolic-ref --short HEAD 2>/dev/null || echo 'detached')"
