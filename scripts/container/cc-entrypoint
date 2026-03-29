@@ -268,9 +268,14 @@ fi
 if ! command -v claude >/dev/null 2>&1; then
     echo "  Installing Claude Code..."
     if command -v npm >/dev/null 2>&1; then
-        npm install -g @anthropic-ai/claude-code 2>/dev/null || true
+        npm install -g @anthropic-ai/claude-code 2>&1 | tail -1 || true
+    elif command -v curl >/dev/null 2>&1; then
+        curl -fsSL https://claude.ai/install.sh | sh 2>&1 | tail -1 || true
     else
-        echo "WARNING: npm not found — cannot install Claude Code" >&2
+        echo "ERROR: Cannot install Claude Code — no npm or curl available" >&2
+        echo "  Install Node.js/npm in your Dockerfile, or use the base image:" >&2
+        echo "  FROM ghcr.io/hypermemetic/claude-container:latest" >&2
+        exit 1
     fi
 fi
 
