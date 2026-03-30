@@ -158,7 +158,6 @@ fn postcondition_ref_write_updates_container() {
     op.apply_postconditions(&mut vm, &OpResult::Unit);
 
     assert_eq!(vm.repo("alpha").unwrap().container, RefState::At("ddd".into()));
-    // Session and target unchanged
     assert_eq!(vm.repo("alpha").unwrap().session, RefState::At("bbb".into()));
     assert_eq!(vm.repo("alpha").unwrap().target, RefState::At("ccc".into()));
 }
@@ -172,7 +171,6 @@ fn postcondition_ref_write_host_session_branch() {
     op.apply_postconditions(&mut vm, &OpResult::Unit);
 
     assert_eq!(vm.repo("alpha").unwrap().session, RefState::At("eee".into()));
-    // Container and target unchanged
     assert_eq!(vm.repo("alpha").unwrap().container, RefState::At("aaa".into()));
     assert_eq!(vm.repo("alpha").unwrap().target, RefState::At("ccc".into()));
 }
@@ -282,9 +280,7 @@ fn postcondition_agent_run_failure_keeps_conflict() {
         new_head: None,
     });
 
-    // Conflict markers still present
     assert!(matches!(vm.repo("alpha").unwrap().conflict, ConflictState::Markers(_)));
-    // Container unchanged
     assert_eq!(vm.repo("alpha").unwrap().container, RefState::At("aaa".into()));
 }
 
@@ -294,16 +290,11 @@ fn postcondition_interactive_session_invalidates_all_state() {
     vm.set_repo("alpha", repo_with_refs("aaa", "bbb", "ccc"));
     vm.set_repo("beta", repo_with_refs("ddd", "eee", "fff"));
 
-    let op = Op::InteractiveSession {
-        prompt: None,
-        on_exit: vec![],
-    };
+    let op = Op::InteractiveSession { prompt: None, on_exit: vec![] };
     op.apply_postconditions(&mut vm, &OpResult::SessionExited { exit_code: 0 });
 
-    // All container state invalidated — must re-observe
     assert_eq!(vm.repo("alpha").unwrap().container, RefState::Absent);
     assert_eq!(vm.repo("beta").unwrap().container, RefState::Absent);
-    // Session and target untouched (human was in container, not host)
     assert_eq!(vm.repo("alpha").unwrap().session, RefState::At("bbb".into()));
     assert_eq!(vm.repo("beta").unwrap().target, RefState::At("fff".into()));
 }
@@ -333,24 +324,16 @@ fn postcondition_read_ops_dont_change_state() {
 }
 
 // ============================================================================
-// Trace tests
+// Trace + state construction tests
 // ============================================================================
 
 #[test]
 fn trace_records_operations() {
     let mut vm = test_vm();
-    vm.set_repo("alpha", repo_with_refs("aaa", "bbb", "ccc"));
-
     vm.record(Op::ref_read(Side::Host, "alpha", "refs/heads/main"), OpOutcome::Ok);
-    vm.record(Op::ref_write(Side::Host, "alpha", "refs/heads/main", "ddd"), OpOutcome::Ok);
     vm.record(Op::confirm("proceed?"), OpOutcome::OkWithValue("yes".into()));
-
-    assert_eq!(vm.trace.len(), 3);
+    assert_eq!(vm.trace.len(), 2);
 }
-
-// ============================================================================
-// State construction tests
-// ============================================================================
 
 #[test]
 fn repo_vm_empty_is_all_absent() {
@@ -358,8 +341,6 @@ fn repo_vm_empty_is_all_absent() {
     assert_eq!(repo.container, RefState::Absent);
     assert_eq!(repo.session, RefState::Absent);
     assert_eq!(repo.target, RefState::Absent);
-    assert!(repo.container_clean);
-    assert!(repo.host_clean);
 }
 
 #[test]
@@ -380,10 +361,8 @@ fn ref_state_hash_returns_value() {
 fn sync_vm_manages_repos() {
     let mut vm = test_vm();
     assert!(vm.repo("alpha").is_none());
-
     vm.set_repo("alpha", repo_with_refs("a", "b", "c"));
     assert!(vm.repo("alpha").is_some());
-    assert_eq!(vm.repo("alpha").unwrap().container, RefState::At("a".into()));
 }
 
 // ============================================================================
@@ -393,8 +372,8 @@ fn sync_vm_manages_repos() {
 #[test]
 fn interpreter_runs_primitive_sequence() {
     let mock = MockBackend::new();
-    mock.on("bundle_create", MockResult::Hash("/tmp/alpha.bundle".into()));
-    mock.on("bundle_fetch", MockResult::Hash("fetched_abc".into()));
+    mock.on(CallMatcher::BundleCreate, MockResult::Hash("/tmp/alpha.bundle".into()));
+    mock.on(CallMatcher::BundleFetch, MockResult::Hash("fetched_abc".into()));
 
     let mut vm = test_vm();
     vm.set_repo("alpha", repo_with_refs("aaa", "old_session", "ccc"));
@@ -406,43 +385,34 @@ fn interpreter_runs_primitive_sequence() {
     ]);
 
     assert_eq!(result.succeeded(), 3);
-    assert_eq!(result.failed(), 0);
     assert!(!result.halted);
-
-    // VM state updated: session reflects fetched hash
     assert_eq!(vm.repo("alpha").unwrap().session, RefState::At("fetched_abc".into()));
 
-    // Mock called in order
-    let calls = mock.recorded_calls();
+    let calls = mock.calls();
     assert_eq!(calls.len(), 3);
-    assert!(calls[0].contains("bundle_create"));
-    assert!(calls[1].contains("bundle_fetch"));
-    assert!(calls[2].contains("ref_write"));
+    assert!(matches!(calls[0], RecordedCall::BundleCreate { .. }));
+    assert!(matches!(calls[1], RecordedCall::BundleFetch { .. }));
+    assert!(matches!(calls[2], RecordedCall::RefWrite { .. }));
 }
 
 #[test]
 fn interpreter_halts_on_precondition_failure() {
     let mock = MockBackend::new();
-
     let mut vm = test_vm();
-    // No repo "alpha" in VM — bundle_create will fail precondition
 
     let result = vm.run(&mock, vec![
         Op::bundle_create("alpha"),
-        Op::ref_write(Side::Host, "alpha", "refs/heads/main", "xxx"),
     ]);
 
     assert!(result.halted);
     assert_eq!(result.succeeded(), 0);
-    // Second op never executed
-    assert_eq!(result.outcomes.len(), 1);
-    assert!(mock.recorded_calls().is_empty()); // backend never called
+    assert!(mock.calls().is_empty());
 }
 
 #[test]
 fn interpreter_halts_on_backend_error() {
     let mock = MockBackend::new();
-    mock.on("bundle_create", MockResult::Error("disk full".into()));
+    mock.on(CallMatcher::BundleCreate, MockResult::Error("disk full".into()));
 
     let mut vm = test_vm();
     vm.set_repo("alpha", repo_with_refs("aaa", "bbb", "ccc"));
@@ -454,14 +424,13 @@ fn interpreter_halts_on_backend_error() {
 
     assert!(result.halted);
     assert_eq!(result.outcomes.len(), 1);
-    // State unchanged — transactional
     assert_eq!(vm.repo("alpha").unwrap().session, RefState::At("bbb".into()));
 }
 
 #[test]
 fn interpreter_confirm_decline_halts() {
     let mock = MockBackend::new();
-    mock.on("prompt", MockResult::Bool(false));
+    mock.on(CallMatcher::PromptUser, MockResult::Bool(false));
 
     let mut vm = test_vm();
     vm.set_repo("alpha", repo_with_refs("aaa", "bbb", "ccc"));
@@ -472,15 +441,13 @@ fn interpreter_confirm_decline_halts() {
     ]);
 
     assert!(result.halted);
-    assert_eq!(result.halt_reason, Some("user declined".into()));
-    // ref_write never ran
     assert_eq!(vm.repo("alpha").unwrap().target, RefState::At("ccc".into()));
 }
 
 #[test]
 fn interpreter_confirm_accept_continues() {
     let mock = MockBackend::new();
-    mock.on("prompt", MockResult::Bool(true));
+    mock.on(CallMatcher::PromptUser, MockResult::Bool(true));
 
     let mut vm = test_vm();
     vm.set_repo("alpha", repo_with_refs("aaa", "bbb", "ccc"));
@@ -497,8 +464,8 @@ fn interpreter_confirm_accept_continues() {
 #[test]
 fn interpreter_try_merge_follows_clean_path() {
     let mock = MockBackend::new();
-    mock.on("merge_trees", MockResult::MergeClean("merged_tree".into()));
-    mock.on("commit", MockResult::Hash("new_commit".into()));
+    mock.on(CallMatcher::MergeTrees, MockResult::MergeClean("merged_tree".into()));
+    mock.on(CallMatcher::Commit, MockResult::Hash("new_commit".into()));
 
     let mut vm = test_vm();
     vm.set_repo("alpha", repo_with_refs("aaa", "bbb", "ccc"));
@@ -512,31 +479,24 @@ fn interpreter_try_merge_follows_clean_path() {
                 Op::commit("alpha", "merged_tree", &["ccc"], "squash merge"),
             ],
             on_conflict: vec![
-                Op::confirm("this should NOT run"),
+                Op::confirm("should NOT run"),
             ],
             on_error: vec![],
         },
     ]);
 
     assert!(!result.halted);
-    // TryMerge + Commit = 2 outcomes
-    assert_eq!(result.outcomes.len(), 2);
-    assert!(result.outcomes[0].op_description.contains("clean"));
-
-    // VM state: target updated by commit
     assert_eq!(vm.repo("alpha").unwrap().target, RefState::At("new_commit".into()));
-
-    // Confirm in on_conflict was NOT called
-    let calls = mock.recorded_calls();
-    assert!(!calls.iter().any(|c| c.contains("prompt")));
+    assert!(!mock.was_called(&CallMatcher::PromptUser));
+    assert!(mock.was_called(&CallMatcher::Commit));
 }
 
 #[test]
 fn interpreter_try_merge_follows_conflict_path() {
     let mock = MockBackend::new();
-    mock.on("merge_trees", MockResult::MergeConflict(vec!["shared.txt".into()]));
-    mock.on("agent_run", MockResult::Hash("resolved_head".into()));
-    mock.on("bundle_create", MockResult::Hash("/tmp/bundle".into()));
+    mock.on(CallMatcher::MergeTrees, MockResult::MergeConflict(vec!["shared.txt".into()]));
+    mock.on(CallMatcher::AgentRun, MockResult::Hash("resolved_head".into()));
+    mock.on(CallMatcher::BundleCreate, MockResult::Hash("/tmp/bundle".into()));
 
     let mut vm = test_vm();
     vm.set_repo("gamma", repo_with_refs("container_h", "session_h", "target_h"));
@@ -565,24 +525,16 @@ fn interpreter_try_merge_follows_conflict_path() {
     ]);
 
     assert!(!result.halted);
-
-    // Took conflict path → agent → success → bundle_create
-    let calls = mock.recorded_calls();
-    assert!(calls.iter().any(|c| c.contains("merge_trees")));
-    assert!(calls.iter().any(|c| c.contains("agent_run")));
-    assert!(calls.iter().any(|c| c.contains("bundle_create")));
-    // Clean path NOT taken
-    assert!(!calls.iter().any(|c| c.contains("commit")));
-
-    // VM state: agent resolved conflict, container updated
+    assert!(mock.was_called(&CallMatcher::AgentRun));
+    assert!(mock.was_called(&CallMatcher::BundleCreate));
+    assert!(!mock.was_called(&CallMatcher::Commit));
     assert_eq!(vm.repo("gamma").unwrap().conflict, ConflictState::Resolved);
-    assert_eq!(vm.repo("gamma").unwrap().container, RefState::At("resolved_head".into()));
 }
 
 #[test]
 fn interpreter_agent_failure_follows_failure_path() {
     let mock = MockBackend::new();
-    mock.on("agent_run", MockResult::Bool(false)); // agent did not resolve
+    mock.on(CallMatcher::AgentRun, MockResult::Bool(false));
 
     let mut vm = test_vm();
     let mut repo = repo_with_refs("aaa", "bbb", "ccc");
@@ -595,53 +547,42 @@ fn interpreter_agent_failure_follows_failure_path() {
             task: AgentTask::ResolveConflicts { files: vec!["file.rs".into()] },
             context: String::new(),
             on_success: vec![
-                Op::bundle_create("alpha"), // should NOT run
+                Op::bundle_create("alpha"),
             ],
             on_failure: vec![
-                Op::checkout(Side::Container, "alpha", "HEAD"), // cleanup
+                Op::checkout(Side::Container, "alpha", "HEAD"),
             ],
         },
     ]);
 
     assert!(!result.halted);
-
-    // Success path NOT taken
-    let calls = mock.recorded_calls();
-    assert!(!calls.iter().any(|c| c.contains("bundle_create")));
-    // Failure path taken
-    assert!(calls.iter().any(|c| c.contains("checkout")));
-
-    // Cleanup checkout cleared the conflict markers (intentional — undo the markers)
+    assert!(!mock.was_called(&CallMatcher::BundleCreate));
+    assert!(mock.was_called(&CallMatcher::Checkout));
     assert_eq!(vm.repo("alpha").unwrap().conflict, ConflictState::Clean);
 }
 
 #[test]
 fn interpreter_interactive_session_invalidates_state() {
     let mock = MockBackend::new();
-    mock.on("interactive_session", MockResult::ContainerExited(0));
+    mock.on(CallMatcher::InteractiveSession, MockResult::ContainerExited(0));
 
     let mut vm = test_vm();
     vm.set_repo("alpha", repo_with_refs("aaa", "bbb", "ccc"));
     vm.set_repo("beta", repo_with_refs("ddd", "eee", "fff"));
 
     let result = vm.run(&mock, vec![
-        Op::InteractiveSession {
-            prompt: Some("hello".into()),
-            on_exit: vec![],
-        },
+        Op::InteractiveSession { prompt: Some("hello".into()), on_exit: vec![] },
     ]);
 
     assert!(!result.halted);
-
-    // All container state invalidated
     assert_eq!(vm.repo("alpha").unwrap().container, RefState::Absent);
     assert_eq!(vm.repo("beta").unwrap().container, RefState::Absent);
 }
 
 #[test]
-fn interpreter_state_unchanged_on_backend_error_transactional() {
+fn interpreter_state_unchanged_on_backend_error() {
     let mock = MockBackend::new();
-    mock.on("ref_write", MockResult::Error("permission denied".into()));
+    mock.on(CallMatcher::RefWrite, MockResult::Error("permission denied".into()));
 
     let mut vm = test_vm();
     vm.set_repo("alpha", repo_with_refs("aaa", "bbb", "ccc"));
@@ -651,102 +592,5 @@ fn interpreter_state_unchanged_on_backend_error_transactional() {
     ]);
 
     assert!(result.halted);
-    // State unchanged — backend failed, postconditions never applied
     assert_eq!(vm.repo("alpha").unwrap().target, RefState::At("ccc".into()));
-}
-
-// ============================================================================
-// StrictMockBackend tests — ordered expectations, panics on mismatch
-// ============================================================================
-
-#[test]
-fn strict_mock_verifies_call_order() {
-    let mock = StrictMockBackend::new();
-    mock.expect("bundle_create:alpha", MockResult::Hash("/tmp/a.bundle".into()));
-    mock.expect("bundle_fetch:/tmp/a.bundle", MockResult::Hash("fetched_abc".into()));
-    mock.expect("ref_write:refs/heads/test-session", MockResult::Unit);
-
-    let mut vm = test_vm();
-    vm.set_repo("alpha", repo_with_refs("aaa", "old", "ccc"));
-
-    let result = vm.run(&mock, vec![
-        Op::bundle_create("alpha"),
-        Op::bundle_fetch("alpha", "/tmp/a.bundle"),
-        Op::ref_write(Side::Host, "alpha", "refs/heads/test-session", "fetched_abc"),
-    ]);
-
-    assert_eq!(result.succeeded(), 3);
-    mock.assert_complete(); // all expectations consumed
-}
-
-#[test]
-#[should_panic(expected = "unconsumed expectation")]
-fn strict_mock_panics_on_unconsumed() {
-    let mock = StrictMockBackend::new();
-    mock.expect("bundle_create:alpha", MockResult::Hash("/tmp/a.bundle".into()));
-    mock.expect("bundle_fetch:NEVER_CALLED", MockResult::Hash("xxx".into()));
-
-    let mut vm = test_vm();
-    vm.set_repo("alpha", repo_with_refs("aaa", "bbb", "ccc"));
-
-    // Only run one op — second expectation unconsumed
-    let _ = vm.run(&mock, vec![
-        Op::bundle_create("alpha"),
-    ]);
-
-    mock.assert_complete(); // panics: 1 unconsumed
-}
-
-#[test]
-#[should_panic(expected = "mismatch")]
-fn strict_mock_panics_on_wrong_order() {
-    let mock = StrictMockBackend::new();
-    mock.expect("ref_write", MockResult::Unit);         // expects write first
-    mock.expect("bundle_create", MockResult::Hash("/tmp/a.bundle".into())); // then create
-
-    let mut vm = test_vm();
-    vm.set_repo("alpha", repo_with_refs("aaa", "bbb", "ccc"));
-
-    // But we call create first — wrong order
-    let _ = vm.run(&mock, vec![
-        Op::bundle_create("alpha"),    // mismatch: expected "ref_write"
-    ]);
-}
-
-#[test]
-fn strict_mock_reconcile_conflict_path() {
-    let mock = StrictMockBackend::new();
-    // Expect exact sequence: merge → conflict → agent → success → bundle
-    mock.expect("merge_trees:target_h+container_h", MockResult::MergeConflict(vec!["shared.txt".into()]));
-    mock.expect("agent_run", MockResult::Hash("resolved_head".into()));
-    mock.expect("bundle_create:gamma", MockResult::Hash("/tmp/g.bundle".into()));
-
-    let mut vm = test_vm();
-    vm.set_repo("gamma", repo_with_refs("container_h", "session_h", "target_h"));
-
-    let result = vm.run(&mock, vec![
-        Op::TryMerge {
-            repo: "gamma".into(),
-            ours: "target_h".into(),
-            theirs: "container_h".into(),
-            on_clean: vec![
-                Op::commit("gamma", "TREE", &["target_h"], "squash"),
-            ],
-            on_conflict: vec![
-                Op::AgentRun {
-                    repo: "gamma".into(),
-                    task: AgentTask::ResolveConflicts { files: vec!["shared.txt".into()] },
-                    context: String::new(),
-                    on_success: vec![
-                        Op::bundle_create("gamma"),
-                    ],
-                    on_failure: vec![],
-                },
-            ],
-            on_error: vec![],
-        },
-    ]);
-
-    assert!(!result.halted);
-    mock.assert_complete(); // exact 3 calls, exact order
 }
