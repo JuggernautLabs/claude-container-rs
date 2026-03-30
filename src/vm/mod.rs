@@ -13,8 +13,10 @@ pub mod state;
 pub mod ops;
 pub mod backend;
 pub mod interpreter;
+pub mod git2_backend;
 
 pub use state::*;
 pub use ops::*;
 pub use backend::*;
 pub use interpreter::*;
+pub use git2_backend::Git2Backend;

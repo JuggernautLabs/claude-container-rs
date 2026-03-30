@@ -594,3 +594,256 @@ fn interpreter_state_unchanged_on_backend_error() {
     assert!(result.halted);
     assert_eq!(vm.repo("alpha").unwrap().target, RefState::At("ccc".into()));
 }
+
+// ============================================================================
+// Git2Backend tests — VM ops against real temp repos (no Docker)
+// Repos created via tempfile::TempDir, cleaned up on drop.
+// ============================================================================
+
+use git2::Repository;
+use std::path::Path;
+
+fn make_repo(name: &str) -> (tempfile::TempDir, PathBuf) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join(name);
+    std::fs::create_dir_all(&path).unwrap();
+    let repo = Repository::init(&path).unwrap();
+    let sig = git2::Signature::now("test", "test@test.com").unwrap();
+    std::fs::write(path.join("README.md"), "# test\n").unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(Path::new("README.md")).unwrap();
+    index.write().unwrap();
+    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+    repo.commit(Some("refs/heads/main"), &sig, &sig, "initial", &tree, &[]).unwrap();
+    repo.set_head("refs/heads/main").unwrap();
+    repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force())).unwrap();
+    (tmp, path)
+}
+
+fn commit_file(path: &Path, file: &str, content: &str, msg: &str) -> String {
+    let repo = Repository::open(path).unwrap();
+    let sig = git2::Signature::now("test", "test@test.com").unwrap();
+    if let Some(parent) = Path::new(file).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(path.join(parent)).unwrap();
+        }
+    }
+    std::fs::write(path.join(file), content).unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(Path::new(file)).unwrap();
+    index.write().unwrap();
+    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+    let parent = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &[&parent]).unwrap().to_string()
+}
+
+fn git_branch(path: &Path, name: &str) {
+    let repo = Repository::open(path).unwrap();
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch(name, &head, false).unwrap();
+}
+
+fn git_switch(path: &Path, name: &str) {
+    let repo = Repository::open(path).unwrap();
+    repo.set_head(&format!("refs/heads/{}", name)).unwrap();
+    repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force())).unwrap();
+}
+
+fn head_of(path: &Path, name: &str) -> String {
+    let repo = Repository::open(path).unwrap();
+    let reference = repo.find_reference(&format!("refs/heads/{}", name)).unwrap();
+    let commit = reference.peel_to_commit().unwrap();
+    commit.id().to_string()
+}
+
+fn assert_no_markers(path: &Path, branch_name: &str) {
+    let repo = Repository::open(path).unwrap();
+    let r = repo.find_reference(&format!("refs/heads/{}", branch_name)).unwrap();
+    let commit = r.peel_to_commit().unwrap();
+    let tree = commit.tree().unwrap();
+    tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
+        if let Some(git2::ObjectType::Blob) = entry.kind() {
+            let blob = repo.find_blob(entry.id()).unwrap();
+            let content = std::str::from_utf8(blob.content()).unwrap_or("");
+            let full = if dir.is_empty() { entry.name().unwrap_or("?").to_string() }
+                       else { format!("{}{}", dir, entry.name().unwrap_or("?")) };
+            assert!(!content.contains("<<<<<<<"), "markers in {} on {}", full, branch_name);
+        }
+        git2::TreeWalkResult::Ok
+    }).unwrap();
+}
+
+#[test]
+fn git2_ref_read_and_write() {
+    let (_tmp, path) = make_repo("ref-rw");
+    let backend = Git2Backend::new();
+
+    let head = backend.ref_read(&path, "refs/heads/main").unwrap();
+    assert!(head.is_some());
+
+    let missing = backend.ref_read(&path, "refs/heads/nonexistent").unwrap();
+    assert!(missing.is_none());
+}
+
+#[test]
+fn git2_ancestry_same() {
+    let (_tmp, path) = make_repo("anc-same");
+    let backend = Git2Backend::new();
+    let h = head_of(&path, "main");
+    assert_eq!(backend.ancestry_check(&path, &h, &h).unwrap(), AncestryResult::Same);
+}
+
+#[test]
+fn git2_ancestry_ahead() {
+    let (_tmp, path) = make_repo("anc-ahead");
+    let before = head_of(&path, "main");
+    commit_file(&path, "a.txt", "a", "c1");
+    commit_file(&path, "b.txt", "b", "c2");
+    let after = head_of(&path, "main");
+
+    let backend = Git2Backend::new();
+    let result = backend.ancestry_check(&path, &before, &after).unwrap();
+    assert!(matches!(result, AncestryResult::AIsAncestorOfB { distance: 2 }));
+}
+
+#[test]
+fn git2_ancestry_diverged() {
+    let (_tmp, path) = make_repo("anc-div");
+    git_branch(&path, "session");
+    commit_file(&path, "main.txt", "m", "main");
+    let main_h = head_of(&path, "main");
+
+    git_switch(&path, "session");
+    commit_file(&path, "session.txt", "s", "session");
+    let session_h = head_of(&path, "session");
+
+    let backend = Git2Backend::new();
+    let result = backend.ancestry_check(&path, &main_h, &session_h).unwrap();
+    assert!(matches!(result, AncestryResult::Diverged { a_ahead: 1, b_ahead: 1, .. }));
+}
+
+#[test]
+fn git2_merge_trees_clean() {
+    let (_tmp, path) = make_repo("merge-clean");
+    git_branch(&path, "session");
+    commit_file(&path, "main.txt", "m", "main");
+    let main_h = head_of(&path, "main");
+
+    git_switch(&path, "session");
+    commit_file(&path, "session.txt", "s", "session");
+    let session_h = head_of(&path, "session");
+
+    let backend = Git2Backend::new();
+    let (clean, tree, conflicts) = backend.merge_trees(&path, &main_h, &session_h).unwrap();
+    assert!(clean);
+    assert!(tree.is_some());
+    assert!(conflicts.is_empty());
+}
+
+#[test]
+fn git2_merge_trees_conflict() {
+    let (_tmp, path) = make_repo("merge-conflict");
+    commit_file(&path, "shared.txt", "original", "base");
+    git_branch(&path, "session");
+
+    commit_file(&path, "shared.txt", "main version", "main");
+    let main_h = head_of(&path, "main");
+
+    git_switch(&path, "session");
+    commit_file(&path, "shared.txt", "session version", "session");
+    let session_h = head_of(&path, "session");
+
+    let backend = Git2Backend::new();
+    let (clean, _, conflicts) = backend.merge_trees(&path, &main_h, &session_h).unwrap();
+    assert!(!clean);
+    assert!(conflicts.contains(&"shared.txt".to_string()));
+}
+
+#[test]
+fn git2_vm_merge_advances_target() {
+    let (_tmp, path) = make_repo("vm-merge");
+    git_branch(&path, "session");
+    git_switch(&path, "session");
+    commit_file(&path, "a.txt", "aaa", "c1");
+    commit_file(&path, "b.txt", "bbb", "c2");
+    git_switch(&path, "main");
+
+    let main_before = head_of(&path, "main");
+    let session_h = head_of(&path, "session");
+
+    let backend = Git2Backend::new();
+
+    // Merge trees to get the merged tree hash
+    let (clean, tree, _) = backend.merge_trees(&path, &main_before, &session_h).unwrap();
+    assert!(clean);
+    let tree_hash = tree.unwrap();
+
+    let mut vm = SyncVM::new("session", "main");
+    vm.set_repo("repo", RepoVM::from_refs(
+        RefState::At(session_h.clone()),
+        RefState::At(session_h.clone()),
+        RefState::At(main_before.clone()),
+        Some(path.clone()),
+    ));
+
+    let result = vm.run(&backend, vec![
+        Op::checkout(Side::Host, "repo", "refs/heads/main"),
+        Op::commit("repo", &tree_hash, &[&main_before], "squash merge"),
+    ]);
+
+    assert!(!result.halted, "halted: {:?}", result.halt_reason);
+    let main_after = head_of(&path, "main");
+    assert_ne!(main_before, main_after, "target should advance");
+    assert_no_markers(&path, "main");
+}
+
+#[test]
+fn git2_vm_conflict_target_unchanged() {
+    let (_tmp, path) = make_repo("vm-conflict");
+    commit_file(&path, "shared.txt", "original", "base");
+    git_branch(&path, "session");
+
+    commit_file(&path, "shared.txt", "main version", "main edit");
+    let main_h = head_of(&path, "main");
+
+    git_switch(&path, "session");
+    commit_file(&path, "shared.txt", "session version", "session edit");
+    let session_h = head_of(&path, "session");
+    git_switch(&path, "main");
+
+    let backend = Git2Backend::new();
+    let mut vm = SyncVM::new("session", "main");
+    vm.set_repo("repo", RepoVM::from_refs(
+        RefState::At(session_h.clone()),
+        RefState::At(session_h.clone()),
+        RefState::At(main_h.clone()),
+        Some(path.clone()),
+    ));
+
+    let result = vm.run(&backend, vec![
+        Op::TryMerge {
+            repo: "repo".into(),
+            ours: main_h.clone(),
+            theirs: session_h.clone(),
+            on_clean: vec![
+                Op::commit("repo", "TREE", &[&main_h], "should NOT run"),
+            ],
+            on_conflict: vec![],
+            on_error: vec![],
+        },
+    ]);
+
+    assert!(!result.halted);
+    assert_eq!(head_of(&path, "main"), main_h, "target unchanged after conflict");
+    assert_no_markers(&path, "main");
+}
+
+#[test]
+fn git2_temp_repo_cleaned_up_on_drop() {
+    let path = {
+        let (_tmp, path) = make_repo("cleanup-test");
+        assert!(path.join(".git").exists());
+        path
+    };
+    assert!(!path.exists(), "temp repo should be gone after drop");
+}
