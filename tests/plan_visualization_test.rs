@@ -23,11 +23,30 @@ fn show_plan(label: &str, vm: &SyncVM) {
     let pull_ops = programs::plan_pull(vm);
     let sync_ops = programs::plan_sync(vm);
 
-    eprintln!("\n  === {} ===", label);
-    eprintln!("  push: {}", if push_ops.is_empty() { "(empty)".into() } else { format!("{} ops", push_ops.len()) });
-    for op in &push_ops { eprintln!("    {}", op); }
-    eprintln!("  pull: {}", if pull_ops.is_empty() { "(empty)".into() } else { format!("{} ops", pull_ops.len()) });
-    for op in &pull_ops { eprintln!("    {}", op); }
+    eprintln!("\n  ╔══ {} ══╗", label);
+
+    // Show repo state
+    for (name, repo) in &vm.repos {
+        eprintln!("  │ {}: container={} session={} target={}{}{}",
+            name,
+            match &repo.container { RefState::At(h) => &h[..7.min(h.len())], RefState::Absent => "absent", RefState::Stale => "stale" },
+            match &repo.session { RefState::At(h) => &h[..7.min(h.len())], RefState::Absent => "absent", RefState::Stale => "stale" },
+            match &repo.target { RefState::At(h) => &h[..7.min(h.len())], RefState::Absent => "absent", RefState::Stale => "stale" },
+            if !repo.container_clean { " [container dirty]" } else { "" },
+            if !repo.host_clean { " [host dirty]" } else { "" },
+        );
+    }
+
+    eprintln!("  ├── push: {}", if push_ops.is_empty() { "(nothing to push)".into() } else { format!("{} op(s)", push_ops.len()) });
+    if !push_ops.is_empty() { eprint!("{}", render_program(&push_ops, 6)); }
+
+    eprintln!("  ├── pull: {}", if pull_ops.is_empty() { "(nothing to pull)".into() } else { format!("{} op(s)", pull_ops.len()) });
+    if !pull_ops.is_empty() { eprint!("{}", render_program(&pull_ops, 6)); }
+
+    eprintln!("  ├── sync: {}", if sync_ops.is_empty() { "(nothing to sync)".into() } else { format!("{} op(s)", sync_ops.len()) });
+    if !sync_ops.is_empty() { eprint!("{}", render_program(&sync_ops, 6)); }
+
+    eprintln!("  ╚══════════════════════════════╝");
     eprintln!("  sync: {}", if sync_ops.is_empty() { "(empty)".into() } else { format!("{} ops", sync_ops.len()) });
     for op in &sync_ops { eprintln!("    {}", op); }
 }
