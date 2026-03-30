@@ -28,7 +28,9 @@ pub(crate) async fn cmd_run(
         let image_name = format!("claude-dev-{}", name);
         let image_ref = ImageRef::new(&image_name);
         eprintln!("  Building image: {}", image_name);
-        lc.build_image(&image_ref, &df_path, &df_path.parent().unwrap_or(&PathBuf::from("."))).await?;
+        let build_context = tempfile::tempdir()?;
+        std::fs::copy(&df_path, build_context.path().join("Dockerfile"))?;
+        lc.build_image(&image_ref, &build_context.path().join("Dockerfile"), build_context.path()).await?;
         image_ref
     } else {
         ImageRef::new("ghcr.io/hypermemetic/claude-container:latest")

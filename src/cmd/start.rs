@@ -246,7 +246,11 @@ pub(crate) async fn resolve_image(
         let image_ref = ImageRef::new(&image_name);
         eprintln!("  image: {} (from {})", image_name.as_str().blue(),
             df_path.display().to_string().as_str().dimmed());
-        lc.build_image(&image_ref, &df_path, &df_path.parent().unwrap_or(&PathBuf::from("."))).await?;
+        // Use a minimal temp dir as build context — avoids sending GB of build artifacts.
+        // The Dockerfile shouldn't COPY source; workspace is mounted as a volume.
+        let build_context = tempfile::tempdir()?;
+        std::fs::copy(&df_path, build_context.path().join("Dockerfile"))?;
+        lc.build_image(&image_ref, &build_context.path().join("Dockerfile"), build_context.path()).await?;
         Ok(image_ref)
     } else {
         let default_image = "ghcr.io/hypermemetic/claude-container:latest";
