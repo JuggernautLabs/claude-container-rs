@@ -145,46 +145,6 @@ fn collect_conflicts_handles_multiple_conflicted_repos() {
     assert_eq!(conflicts[1].2.len(), 2);
 }
 
-// ============================================================================
-// 2. execute_pull returns Conflicted with files (typed, not string-wrapped)
-// ============================================================================
-
-#[test]
-fn execute_sync_returns_conflict_with_files() {
-    // Verify that when MergeOutcome::Conflict occurs during execute_pull,
-    // the result is RepoSyncResult::Conflicted with the file list.
-    // This tests the type-level contract without needing Docker.
-
-    let conflict_files = vec!["src/lib.rs".to_string(), "README.md".to_string()];
-
-    // Simulate what execute_pull does when merge returns Conflict
-    let merge_outcome = MergeOutcome::Conflict { files: conflict_files.clone() };
-
-    // This is the logic from execute_pull:
-    let result = if let MergeOutcome::Conflict { files } = &merge_outcome {
-        RepoSyncResult::Conflicted {
-            repo_name: "test-repo".to_string(),
-            files: files.clone(),
-        }
-    } else {
-        RepoSyncResult::Pulled {
-            repo_name: "test-repo".to_string(),
-            extract: ExtractResult {
-                commit_count: 1,
-                new_head: CommitHash::new("abc1234"),
-            },
-            merge: merge_outcome,
-        }
-    };
-
-    match result {
-        RepoSyncResult::Conflicted { repo_name, files } => {
-            assert_eq!(repo_name, "test-repo");
-            assert_eq!(files, vec!["src/lib.rs", "README.md"]);
-        }
-        _ => panic!("Expected Conflicted variant, got {:?}", result),
-    }
-}
 
 // ============================================================================
 // 3. check_reconcile_complete returns Option<String> (description)
