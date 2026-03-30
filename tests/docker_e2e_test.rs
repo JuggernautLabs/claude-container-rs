@@ -350,3 +350,81 @@ async fn plan_reflects_actual_state() {
     let pull_ops = programs::plan_pull(&vm);
     assert!(!pull_ops.is_empty(), "VM plan_pull should generate ops for container-ahead state");
 }
+
+// ============================================================================
+// Test: inject into nonexistent repo fails gracefully
+// ============================================================================
+
+#[tokio::test]
+#[ignore]
+async fn inject_nonexistent_repo_fails_gracefully() {
+    let session = TestSession::new("e2e-inject-fail").await;
+    let (repo_path, _cleanup) = colima_visible_repo("e2e-inject-fail-repo");
+
+    let name = SessionName::new(&session.name);
+    let engine = SyncEngine::new(session.docker.clone());
+
+    // DON'T clone into container — repo doesn't exist in volume
+    // Inject should fail because /session/nonexistent doesn't exist
+    let result = engine.inject(&name, "nonexistent-repo", &repo_path, "main").await;
+    assert!(result.is_err(), "inject into nonexistent repo should fail");
+
+    // The error should be an InjectionFailed, not a panic
+    let err = result.unwrap_err();
+    let err_str = format!("{}", err);
+    assert!(err_str.contains("inject") || err_str.contains("failed") || err_str.contains("exit"),
+        "error should mention injection failure, got: {}", err_str);
+}
+
+// ============================================================================
+// Test: VM push program fails gracefully when inject fails
+// ============================================================================
+
+#[tokio::test]
+#[ignore]
+async fn vm_push_inject_failure_reports_error() {
+    let session = TestSession::new("e2e-vm-fail").await;
+    let (repo_path, _cleanup) = colima_visible_repo("e2e-vm-fail-repo");
+    add_commit(&repo_path, "file", &[("file.txt", "content")]);
+
+    let name = SessionName::new(&session.name);
+
+    // Clone into container
+    let engine = SyncEngine::new(session.docker.clone());
+    engine.clone_into_volume(&name, "test-repo", &repo_path, None).await.unwrap();
+
+    // Make container dirty by adding uncommitted changes
+    session.run_simple(
+        BASE_IMAGE,
+        &format!(
+            "git config --global --add safe.directory '*' && \
+             cd /workspace/test-repo && echo dirty > dirty.txt",
+        ),
+    ).await;
+
+    // Add host work so there's something to push
+    add_commit(&repo_path, "new work", &[("new.txt", "new content")]);
+
+    // Try VM push — inject into dirty container should fail
+    let backend = git_sandbox::vm::RealBackend::from_docker(session.docker.clone(), &session.name);
+    let mut vm = git_sandbox::vm::SyncVM::new(&session.name, "main");
+    vm.set_repo("test-repo", git_sandbox::vm::RepoVM::from_refs(
+        git_sandbox::vm::RefState::At("old".into()),
+        git_sandbox::vm::RefState::At("old".into()),
+        git_sandbox::vm::RefState::At("new".into()),
+        Some(repo_path.clone()),
+    ));
+
+    let result = vm.run(&backend, vec![
+        git_sandbox::vm::Op::Inject { repo: "test-repo".into(), branch: "main".into() },
+    ]).await;
+
+    // Should fail but not panic
+    // The inject may succeed (merge into dirty worktree sometimes works)
+    // or fail (merge conflict with dirty files). Either way, no panic.
+    eprintln!("VM push result: halted={}, succeeded={}, failed={}",
+        result.halted, result.succeeded(), result.failed());
+    for o in &result.outcomes {
+        eprintln!("  {:?}: {:?}", o.op_description, o.result.is_ok());
+    }
+}

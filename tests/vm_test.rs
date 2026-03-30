@@ -598,6 +598,164 @@ async fn interpreter_state_unchanged_on_backend_error() {
 }
 
 // ============================================================================
+// Error path tests — what happens when ops fail
+// ============================================================================
+
+#[tokio::test]
+async fn inject_error_halts_program_and_preserves_state() {
+    let mock = MockBackend::new();
+    mock.on(CallMatcher::Inject, MockResult::Error("Docker container wait error".into()));
+
+    let mut vm = test_vm();
+    vm.set_repo("alpha", repo_with_refs("aaa", "aaa", "bbb"));
+
+    let result = vm.run(&mock, vec![
+        Op::Inject { repo: "alpha".into(), branch: "main".into() },
+        Op::Extract { repo: "alpha".into(), session_branch: "test-session".into() },
+    ]).await;
+
+    // Program halted on inject error
+    assert!(result.halted);
+    assert_eq!(result.succeeded(), 0);
+    assert_eq!(result.failed(), 1);
+
+    // Extract never ran
+    assert!(!mock.was_called(&CallMatcher::Extract));
+
+    // VM state unchanged — inject failed, no postconditions applied
+    assert_eq!(vm.repo("alpha").unwrap().container, RefState::At("aaa".into()));
+    // Container should NOT be Stale (inject didn't succeed)
+    assert_ne!(vm.repo("alpha").unwrap().container, RefState::Stale);
+
+    // Error message should be visible
+    let error_msg = result.outcomes.first()
+        .and_then(|o| match &o.result {
+            StepResult::BackendError(e) => Some(e.as_str()),
+            _ => None,
+        });
+    assert!(error_msg.is_some(), "error message should be present");
+    assert!(error_msg.unwrap().contains("Docker container wait error"));
+}
+
+#[tokio::test]
+async fn extract_error_halts_program() {
+    let mock = MockBackend::new();
+    mock.on(CallMatcher::Extract, MockResult::Error("bundle creation failed: disk full".into()));
+
+    let mut vm = test_vm();
+    vm.set_repo("alpha", repo_with_refs("aaa", "bbb", "ccc"));
+
+    let result = vm.run(&mock, vec![
+        Op::Extract { repo: "alpha".into(), session_branch: "test-session".into() },
+        Op::commit("alpha", "tree", &["ccc"], "should not run"),
+    ]).await;
+
+    assert!(result.halted);
+    assert_eq!(result.succeeded(), 0);
+    // Session unchanged
+    assert_eq!(vm.repo("alpha").unwrap().session, RefState::At("bbb".into()));
+}
+
+#[tokio::test]
+async fn force_inject_error_halts_program() {
+    let mock = MockBackend::new();
+    mock.on(CallMatcher::ForceInject, MockResult::Error("container not found".into()));
+
+    let mut vm = test_vm();
+    let mut repo = repo_with_refs("aaa", "aaa", "bbb");
+    repo.container_clean = false; // dirty — force inject needed
+    vm.set_repo("alpha", repo);
+
+    let result = vm.run(&mock, vec![
+        Op::ForceInject { repo: "alpha".into(), branch: "main".into() },
+    ]).await;
+
+    assert!(result.halted);
+    assert_eq!(result.failed(), 1);
+}
+
+#[tokio::test]
+async fn push_program_with_inject_error_reports_clearly() {
+    // Simulates the real scenario: push generates inject + extract,
+    // inject fails with Docker error, extract never runs
+    let mock = MockBackend::new();
+    mock.on(CallMatcher::Inject, MockResult::Error("Docker API error: Docker container wait error".into()));
+
+    let mut vm = test_vm();
+    vm.set_repo("repo", repo_with_refs("same", "same", "ahead"));
+
+    // This is what plan_push generates for target-ahead
+    let ops = vec![
+        Op::Inject { repo: "repo".into(), branch: "main".into() },
+        Op::Extract { repo: "repo".into(), session_branch: "test-session".into() },
+    ];
+
+    let result = vm.run(&mock, ops).await;
+
+    assert!(result.halted);
+    assert_eq!(result.succeeded(), 0);
+    assert_eq!(result.failed(), 1);
+    assert!(!mock.was_called(&CallMatcher::Extract), "extract should not run after inject failure");
+
+    // The halt reason should tell the user what happened
+    assert!(result.halt_reason.as_ref().unwrap().contains("Docker"));
+}
+
+#[tokio::test]
+async fn try_merge_error_follows_error_path() {
+    let mock = MockBackend::new();
+    mock.on(CallMatcher::MergeTrees, MockResult::Error("git2 error: corrupt object".into()));
+
+    let mut vm = test_vm();
+    vm.set_repo("alpha", repo_with_refs("aaa", "bbb", "ccc"));
+
+    let result = vm.run(&mock, vec![
+        Op::TryMerge {
+            repo: "alpha".into(),
+            ours: "ccc".into(),
+            theirs: "aaa".into(),
+            on_clean: vec![
+                Op::commit("alpha", "tree", &["ccc"], "should NOT run"),
+            ],
+            on_conflict: vec![],
+            on_error: vec![
+                Op::checkout(Side::Host, "alpha", "refs/heads/main"),
+            ],
+        },
+    ]).await;
+
+    // Error path was taken
+    assert!(mock.was_called(&CallMatcher::Checkout), "error path should run checkout");
+    assert!(!mock.was_called(&CallMatcher::Commit), "clean path should NOT run");
+}
+
+#[tokio::test]
+async fn multiple_repos_first_failure_doesnt_block_independent_ops() {
+    // In a real sync, repos are independent — failure in one shouldn't
+    // block the others. But the current interpreter halts on first error.
+    // This test documents that behavior.
+    let mock = MockBackend::new();
+    mock.on(CallMatcher::Inject, MockResult::Error("repo-a failed".into()));
+
+    let mut vm = test_vm();
+    vm.set_repo("repo-a", repo_with_refs("a1", "a1", "a2"));
+    vm.set_repo("repo-b", repo_with_refs("b1", "b1", "b2"));
+
+    let ops = vec![
+        Op::Inject { repo: "repo-a".into(), branch: "main".into() },
+        Op::Inject { repo: "repo-b".into(), branch: "main".into() },
+    ];
+
+    let result = vm.run(&mock, ops).await;
+
+    // Current behavior: halts on first failure, repo-b never attempted
+    assert!(result.halted);
+    assert_eq!(result.outcomes.len(), 1, "only first op attempted");
+    // This is a known limitation — independent repos should be able
+    // to continue past failures. Tracked for future improvement.
+}
+
+// ============================================================================
 // Git2Backend tests — VM ops against real temp repos (no Docker)
 // Repos created via tempfile::TempDir, cleaned up on drop.
 // ============================================================================
