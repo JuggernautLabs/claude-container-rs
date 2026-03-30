@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use cmd::*;
 
 #[derive(Parser)]
-#[command(name = "git-sandbox", version, about = "Container-isolated Claude Code sessions")]
+#[command(name = "gitvm", version, about = "Container-isolated Claude Code sessions")]
 struct Cli {
     /// Skip all confirmation prompts (use in scripts)
     #[arg(short = 'y', long, global = true)]

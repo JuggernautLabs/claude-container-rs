@@ -1,14 +1,14 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use git_sandbox::types::ids::*;
-use git_sandbox::types::git::*;
-use git_sandbox::types::session::*;
-use git_sandbox::types::verified::*;
-use git_sandbox::types::config::*;
-use git_sandbox::types::image::*;
-use git_sandbox::types::docker::*;
-use git_sandbox::types::volume::*;
+use gitvm::types::ids::*;
+use gitvm::types::git::*;
+use gitvm::types::session::*;
+use gitvm::types::verified::*;
+use gitvm::types::config::*;
+use gitvm::types::image::*;
+use gitvm::types::docker::*;
+use gitvm::types::volume::*;
 
 // ============================================================================
 // Helpers

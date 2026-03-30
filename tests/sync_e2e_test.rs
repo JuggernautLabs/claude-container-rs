@@ -51,8 +51,8 @@ async fn extract_creates_session_branch_on_host() {
 
     // Now extract using the sync engine
     let d = docker();
-    let engine = git_sandbox::sync::SyncEngine::new(d);
-    let session_name = git_sandbox::types::SessionName::new(&session.name);
+    let engine = gitvm::sync::SyncEngine::new(d);
+    let session_name = gitvm::types::SessionName::new(&session.name);
     let session_branch = session_name.to_string();
 
     let extract_result = engine.extract(
@@ -113,7 +113,7 @@ fn merge_squash_creates_commit_on_target() {
 
     // Merge session → main (squash)
     let d = docker();
-    let engine = git_sandbox::sync::SyncEngine::new(d);
+    let engine = gitvm::sync::SyncEngine::new(d);
     let result = engine.merge(&repo.path, "test-session", &main_name, true);
 
     assert!(result.is_ok(), "Merge should succeed: {:?}", result.err());
@@ -164,9 +164,9 @@ fn trial_merge_detects_real_conflict() {
 
     // Trial merge: A into B
     let d = docker();
-    let engine = git_sandbox::sync::SyncEngine::new(d);
-    let a_hash = git_sandbox::types::CommitHash::new(a_head);
-    let b_hash = git_sandbox::types::CommitHash::new(b_head);
+    let engine = gitvm::sync::SyncEngine::new(d);
+    let a_hash = gitvm::types::CommitHash::new(a_head);
+    let b_hash = gitvm::types::CommitHash::new(b_head);
     let result = engine.trial_merge(&repo.path, &b_hash, &a_hash);
 
     assert!(result.is_some(), "Trial merge should return a result");
@@ -200,11 +200,11 @@ fn trial_merge_clean_returns_empty() {
     let b_head = repo.head();
 
     let d = docker();
-    let engine = git_sandbox::sync::SyncEngine::new(d);
+    let engine = gitvm::sync::SyncEngine::new(d);
     let result = engine.trial_merge(
         &repo.path,
-        &git_sandbox::types::CommitHash::new(b_head),
-        &git_sandbox::types::CommitHash::new(a_head),
+        &gitvm::types::CommitHash::new(b_head),
+        &gitvm::types::CommitHash::new(a_head),
     );
 
     assert!(result.is_some(), "Should return result");
@@ -217,7 +217,7 @@ fn trial_merge_clean_returns_empty() {
 
 #[test]
 fn project_repos_excludes_dependencies() {
-    use git_sandbox::types::config::*;
+    use gitvm::types::config::*;
     use std::collections::BTreeMap;
 
     let mut projects = BTreeMap::new();
@@ -254,7 +254,7 @@ async fn clone_creates_files_as_host_uid() {
     let session = TestSession::new("sync-uid").await;
     // TestRepo uses /var/folders temp which Colima can't see.
     // Create repo under ~/.cache instead.
-    let cache_dir = dirs::home_dir().unwrap().join(".cache/git-sandbox/test-repos");
+    let cache_dir = dirs::home_dir().unwrap().join(".cache/gitvm/test-repos");
     std::fs::create_dir_all(&cache_dir).unwrap();
     let repo_path = cache_dir.join("uid-check");
     let _ = std::fs::remove_dir_all(&repo_path);
@@ -273,8 +273,8 @@ async fn clone_creates_files_as_host_uid() {
 
     // Clone into volume using the sync engine
     let d = docker();
-    let engine = git_sandbox::sync::SyncEngine::new(d.clone());
-    let session_name = git_sandbox::types::SessionName::new(&session.name);
+    let engine = gitvm::sync::SyncEngine::new(d.clone());
+    let session_name = gitvm::types::SessionName::new(&session.name);
 
     let clone_result = engine.clone_into_volume(&session_name, "uid-repo", &repo_path, None).await;
     if let Err(ref e) = clone_result {

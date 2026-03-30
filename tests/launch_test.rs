@@ -1,10 +1,10 @@
 //! Launch tests — verify the container actually starts and the entrypoint runs.
 //! Does NOT interact with Claude — creates, starts, verifies, kills.
 
-use git_sandbox::lifecycle::Lifecycle;
-use git_sandbox::session::SessionManager;
-use git_sandbox::types::*;
-use git_sandbox::container;
+use gitvm::lifecycle::Lifecycle;
+use gitvm::session::SessionManager;
+use gitvm::types::*;
+use gitvm::container;
 use std::path::PathBuf;
 
 fn ensure_docker_host() {
@@ -19,7 +19,7 @@ fn ensure_docker_host() {
 }
 
 fn find_script_dir() -> PathBuf {
-    git_sandbox::scripts::materialize().expect("materialize scripts")
+    gitvm::scripts::materialize().expect("materialize scripts")
 }
 
 /// Test the full verified pipeline up to launch — create a test container,
@@ -137,5 +137,5 @@ fn test_entrypoint_scripts_materialize() {
     }
 
     // Verify content matches what's embedded
-    assert!(git_sandbox::scripts::scripts_are_current(&scripts_dir));
+    assert!(gitvm::scripts::scripts_are_current(&scripts_dir));
 }

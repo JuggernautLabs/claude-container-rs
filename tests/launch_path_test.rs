@@ -6,10 +6,10 @@ use harness::*;
 
 fn find_binary() -> std::path::PathBuf {
     [
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/git-sandbox"),
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/release/git-sandbox"),
-        dirs::home_dir().unwrap_or_default().join(".cargo/bin/git-sandbox"),
-    ].into_iter().find(|p| p.exists()).expect("build git-sandbox first")
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/gitvm"),
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/release/gitvm"),
+        dirs::home_dir().unwrap_or_default().join(".cargo/bin/gitvm"),
+    ].into_iter().find(|p| p.exists()).expect("build gitvm first")
 }
 
 async fn cleanup(d: &bollard::Docker, name: &str) {

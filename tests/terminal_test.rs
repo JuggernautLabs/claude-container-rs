@@ -3,7 +3,7 @@
 //! These tests verify that restore_terminal() consolidates all terminal
 //! cleanup into a single function, and that it's idempotent.
 
-use git_sandbox::container;
+use gitvm::container;
 
 #[test]
 fn restore_terminal_shows_cursor() {

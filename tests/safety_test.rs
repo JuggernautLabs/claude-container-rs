@@ -7,7 +7,7 @@
 #[test]
 fn yes_flag_skips_all_confirmations() {
     // confirm(prompt, auto_yes=true) should return true immediately
-    assert!(git_sandbox::confirm("Dangerous operation?", true));
+    assert!(gitvm::confirm("Dangerous operation?", true));
 }
 
 /// Verify confirm() returns true on empty input (defaults to yes).
@@ -16,8 +16,8 @@ fn yes_flag_skips_all_confirmations() {
 #[test]
 fn confirm_is_public_and_callable() {
     // auto_yes = true always returns true
-    assert!(git_sandbox::confirm("Delete everything?", true));
-    assert!(git_sandbox::confirm("", true));
+    assert!(gitvm::confirm("Delete everything?", true));
+    assert!(gitvm::confirm("", true));
 }
 
 // ============================================================================
@@ -36,7 +36,7 @@ fn session_stop_requires_confirmation() {
     //
     // This is a compile-time assertion: if cmd_session_stop's signature doesn't
     // accept auto_yes, this test file won't compile.
-    let _ = git_sandbox::cmd_session_stop_requires_confirm;
+    let _ = gitvm::cmd_session_stop_requires_confirm;
 }
 
 // ============================================================================
@@ -49,6 +49,6 @@ fn session_stop_requires_confirmation() {
 fn rebuild_validates_image_before_removing_container() {
     // This is a compile-time check: the constant only exists if the
     // implementation builds the image first.
-    assert!(git_sandbox::REBUILD_VALIDATES_BEFORE_REMOVE);
+    assert!(gitvm::REBUILD_VALIDATES_BEFORE_REMOVE);
 }
 

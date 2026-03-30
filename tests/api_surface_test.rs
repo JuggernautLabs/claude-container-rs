@@ -12,14 +12,14 @@ use git2::Repository;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use git_sandbox::sync::SyncEngine;
-use git_sandbox::types::{SessionName, CommitHash};
-use git_sandbox::types::git::*;
-use git_sandbox::types::action::*;
+use gitvm::sync::SyncEngine;
+use gitvm::types::{SessionName, CommitHash};
+use gitvm::types::git::*;
+use gitvm::types::action::*;
 
 /// Helper: create a TestRepo under ~/.cache so Colima can see it (macOS /var/folders not shared)
 fn colima_visible_repo(name: &str) -> (PathBuf, impl Drop) {
-    let cache_dir = dirs::home_dir().unwrap().join(".cache/git-sandbox/test-repos");
+    let cache_dir = dirs::home_dir().unwrap().join(".cache/gitvm/test-repos");
     std::fs::create_dir_all(&cache_dir).unwrap();
     let repo_path = cache_dir.join(name);
     let _ = std::fs::remove_dir_all(&repo_path);

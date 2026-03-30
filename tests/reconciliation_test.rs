@@ -7,7 +7,7 @@
 //! - Post-reconciliation verification of extract success
 //! - Shared verification pipeline (deduplicated from cmd_start)
 
-use git_sandbox::types::{
+use gitvm::types::{
     action::{RepoSyncResult, SyncResult, ExtractResult},
     git::MergeOutcome,
     CommitHash, SessionName,
@@ -239,10 +239,10 @@ fn sync_result_counts_conflicted_repos() {
 /// Docker, but we verify the type exists and is constructible.
 #[test]
 fn verification_pipeline_struct_exists() {
-    use git_sandbox::types::verified::*;
-    use git_sandbox::types::ids::*;
-    use git_sandbox::types::image::*;
-    use git_sandbox::types::docker::*;
+    use gitvm::types::verified::*;
+    use gitvm::types::ids::*;
+    use gitvm::types::image::*;
+    use gitvm::types::docker::*;
 
     // Verify we can construct the proofs that the pipeline produces
     let docker = Verified::__test_new(DockerAvailable { version: "24.0".to_string() });

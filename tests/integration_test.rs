@@ -8,11 +8,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use git_sandbox::lifecycle::Lifecycle;
-use git_sandbox::session::SessionManager;
-use git_sandbox::sync::SyncEngine;
-use git_sandbox::types::docker::DockerState;
-use git_sandbox::types::{ImageRef, SessionName};
+use gitvm::lifecycle::Lifecycle;
+use gitvm::session::SessionManager;
+use gitvm::sync::SyncEngine;
+use gitvm::types::docker::DockerState;
+use gitvm::types::{ImageRef, SessionName};
 
 // ============================================================================
 // Helpers
@@ -284,7 +284,7 @@ async fn test_discover_existing_session() {
     assert!(
         !matches!(
             discovered,
-            git_sandbox::types::DiscoveredSession::DoesNotExist(_)
+            gitvm::types::DiscoveredSession::DoesNotExist(_)
         ),
         "synapse-cc-ux should exist (Running, Stopped, or VolumesOnly), got {:?}",
         discovered
@@ -305,7 +305,7 @@ async fn test_discover_nonexistent_session() {
     assert!(
         matches!(
             discovered,
-            git_sandbox::types::DiscoveredSession::DoesNotExist(_)
+            gitvm::types::DiscoveredSession::DoesNotExist(_)
         ),
         "{} should be DoesNotExist, got {:?}",
         name,

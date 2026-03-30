@@ -53,7 +53,7 @@ pub fn token() -> Option<String> {
 }
 
 pub fn script_dir() -> PathBuf {
-    git_sandbox::scripts::materialize().expect("materialize scripts")
+    gitvm::scripts::materialize().expect("materialize scripts")
 }
 
 pub const BASE_IMAGE: &str = "ghcr.io/hypermemetic/claude-container:latest";

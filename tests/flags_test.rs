@@ -21,7 +21,7 @@ fn continue_flag_sets_env_var() {
     // build_create_args is private, so we test through the public container API.
     // The LaunchOptions struct carries continue/prompt through to build_create_args.
     // We verify the env var by checking the args built with continue_session=true.
-    use git_sandbox::container::LaunchOptions;
+    use gitvm::container::LaunchOptions;
 
     let opts = LaunchOptions {
         continue_session: true,
@@ -38,7 +38,7 @@ fn continue_flag_sets_env_var() {
 
 #[test]
 fn continue_flag_absent_when_false() {
-    use git_sandbox::container::LaunchOptions;
+    use gitvm::container::LaunchOptions;
 
     let opts = LaunchOptions {
         continue_session: false,
@@ -59,7 +59,7 @@ fn continue_flag_absent_when_false() {
 
 #[test]
 fn prompt_flag_sets_env_var_base64() {
-    use git_sandbox::container::LaunchOptions;
+    use gitvm::container::LaunchOptions;
 
     let opts = LaunchOptions {
         continue_session: false,
@@ -86,7 +86,7 @@ fn prompt_flag_sets_env_var_base64() {
 
 #[test]
 fn prompt_flag_absent_when_none() {
-    use git_sandbox::container::LaunchOptions;
+    use gitvm::container::LaunchOptions;
 
     let opts = LaunchOptions {
         continue_session: false,
@@ -209,7 +209,7 @@ fn squash_false_uses_merge_commit() {
 
 #[test]
 fn role_dependency_implies_no_extract() {
-    use git_sandbox::types::config::{SessionConfig, ProjectConfig, RepoRole};
+    use gitvm::types::config::{SessionConfig, ProjectConfig, RepoRole};
 
     let mut projects = BTreeMap::new();
     projects.insert("my-project".to_string(), ProjectConfig {
@@ -243,9 +243,9 @@ fn role_dependency_implies_no_extract() {
 // Helpers
 // ============================================================================
 
-fn create_sync_engine() -> git_sandbox::sync::SyncEngine {
+fn create_sync_engine() -> gitvm::sync::SyncEngine {
     let docker = harness::docker();
-    git_sandbox::sync::SyncEngine::new(docker)
+    gitvm::sync::SyncEngine::new(docker)
 }
 
 /// Simple base64 decode for test verification

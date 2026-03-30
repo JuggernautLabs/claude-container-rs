@@ -522,10 +522,10 @@ pub async fn launch_reconciliation(
 
     if check.is_some() {
         eprintln!("  {} Reconciliation complete.", colored::Colorize::green("✓"));
-        eprintln!("  Run `git-sandbox start -s {}` to resume your session.", session_name);
+        eprintln!("  Run `gitvm start -s {}` to resume your session.", session_name);
     } else {
         eprintln!("  {} Exited without completing reconciliation.", colored::Colorize::yellow("⚠"));
-        eprintln!("  Session container was stopped. Run `git-sandbox start -s {}` to resume.", session_name);
+        eprintln!("  Session container was stopped. Run `gitvm start -s {}` to resume.", session_name);
     }
 
     Ok(check)
@@ -672,7 +672,7 @@ async fn attach_container(
                     if buf[..n].contains(&0x1a) {
                         detach_flag_clone.store(true, std::sync::atomic::Ordering::SeqCst);
                         restore_terminal();
-                        eprintln!("\r\n→ Detached from {} (still running). Resume with: git-sandbox session -s <name> start -a",
+                        eprintln!("\r\n→ Detached from {} (still running). Resume with: gitvm session -s <name> start -a",
                             ctr_name_for_stdin);
                         break;
                     }

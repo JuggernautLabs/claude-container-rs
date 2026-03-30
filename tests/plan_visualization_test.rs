@@ -4,7 +4,7 @@
 //! These are both tests AND documentation. Each test prints the plan
 //! so you can see exactly what ops would execute.
 
-use git_sandbox::vm::*;
+use gitvm::vm::*;
 use std::path::PathBuf;
 
 fn vm_with_repo(container: &str, session: &str, target: &str) -> SyncVM {

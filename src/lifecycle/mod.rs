@@ -183,7 +183,7 @@ impl Lifecycle {
                          Check:\n\
                          - Is Docker or Colima running?\n\
                          - Does the socket file exist? (ls -la {})\n\
-                         - Try: DOCKER_HOST=unix://<path> git-sandbox <command>",
+                         - Try: DOCKER_HOST=unix://<path> gitvm <command>",
                         host, e, sock_path
                     )))?;
                 (d, host)
@@ -1208,7 +1208,7 @@ fn check_build_context_hint(dockerfile: &Path, lines: &[String], name: &ImageRef
     eprintln!("  It's an external build context (a sibling directory) that Docker");
     eprintln!("  needs to be told about with --build-context flags.");
     eprintln!();
-    eprintln!("  git-sandbox doesn't pass --build-context yet, so build manually:");
+    eprintln!("  gitvm doesn't pass --build-context yet, so build manually:");
     eprintln!();
     let ctx_args: String = build_contexts.iter()
         .map(|c| format!("    --build-context {}=../{} \\", c, c))
@@ -1219,7 +1219,7 @@ fn check_build_context_hint(dockerfile: &Path, lines: &[String], name: &ImageRef
     eprintln!("    -t {} .", name.as_str());
     eprintln!();
     eprintln!("  Then start with the pre-built image:");
-    eprintln!("    git-sandbox start -s <session> --image {}", name.as_str());
+    eprintln!("    gitvm start -s <session> --image {}", name.as_str());
 }
 
 /// Parse a Dockerfile for COPY --from=<name> references that aren't
@@ -1323,7 +1323,7 @@ fn create_build_tar(dockerfile: &Path, context: &Path) -> Result<Vec<u8>> {
                  Or build the image manually and use --image:\n\
                  \n\
                      docker build -t <name> -f {} {}\n\
-                     git-sandbox start --session <name> --image <name>\n",
+                     gitvm start --session <name> --image <name>\n",
                 context.display(), dockerfile.display(), context.display()
             ));
         } else {
@@ -1333,7 +1333,7 @@ fn create_build_tar(dockerfile: &Path, context: &Path) -> Result<Vec<u8>> {
                  Add more exclusions or build manually:\n\
                  \n\
                      docker build -t <name> -f {} {}\n\
-                     git-sandbox start --session <name> --image <name>\n",
+                     gitvm start --session <name> --image <name>\n",
                 dockerfile.display(), context.display()
             ));
         }

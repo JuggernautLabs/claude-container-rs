@@ -104,21 +104,21 @@ pub(crate) async fn cmd_extract(name: &SessionName, filter: Option<&str>, dry_ru
     }
 
     // Extract via VM
-    let backend = git_sandbox::vm::RealBackend::from_docker(lc.docker_client().clone(), name.as_str());
-    let mut vm = git_sandbox::vm::SyncVM::new(name.as_str(), "");
+    let backend = gitvm::vm::RealBackend::from_docker(lc.docker_client().clone(), name.as_str());
+    let mut vm = gitvm::vm::SyncVM::new(name.as_str(), "");
 
     let mut extracted = 0u32;
     let mut failed = 0u32;
     for (vr, host_path, session_branch, _, _) in &changed {
-        vm.set_repo(&vr.name, git_sandbox::vm::RepoVM::from_refs(
-            git_sandbox::vm::RefState::At(vr.head.as_str().to_string()),
-            git_sandbox::vm::RefState::Absent,
-            git_sandbox::vm::RefState::Absent,
+        vm.set_repo(&vr.name, gitvm::vm::RepoVM::from_refs(
+            gitvm::vm::RefState::At(vr.head.as_str().to_string()),
+            gitvm::vm::RefState::Absent,
+            gitvm::vm::RefState::Absent,
             Some(host_path.clone()),
         ));
 
         let result = vm.run(&backend, vec![
-            git_sandbox::vm::Op::Extract { repo: vr.name.clone(), session_branch: session_branch.clone() },
+            gitvm::vm::Op::Extract { repo: vr.name.clone(), session_branch: session_branch.clone() },
         ]).await;
 
         if result.succeeded() > 0 {
@@ -127,7 +127,7 @@ pub(crate) async fn cmd_extract(name: &SessionName, filter: Option<&str>, dry_ru
         } else {
             let err = result.outcomes.first()
                 .and_then(|o| match &o.result {
-                    git_sandbox::vm::StepResult::BackendError(e) => Some(e.as_str()),
+                    gitvm::vm::StepResult::BackendError(e) => Some(e.as_str()),
                     _ => None,
                 })
                 .unwrap_or("unknown error");
@@ -159,12 +159,12 @@ pub(crate) async fn cmd_pull(name: &SessionName, branch: &str, filter: Option<&s
     use std::io::Write;
 
     // Phase 1: Extract via VM
-    let backend = git_sandbox::vm::RealBackend::from_docker(lc.docker_client().clone(), name.as_str());
+    let backend = gitvm::vm::RealBackend::from_docker(lc.docker_client().clone(), name.as_str());
     let plan = if has_extractable {
         let mut vm = build_vm_from_plan(name, branch, &initial_plan.action, &repo_paths);
         let extract_ops: Vec<_> = initial_plan.action.repo_actions.iter()
             .filter(|a| matches!(a.state.pull_action(), PullAction::Extract { .. } | PullAction::CloneToHost | PullAction::Reconcile))
-            .map(|a| git_sandbox::vm::Op::Extract {
+            .map(|a| gitvm::vm::Op::Extract {
                 repo: a.repo_name.clone(),
                 session_branch: name.to_string(),
             })
@@ -285,8 +285,8 @@ pub(crate) async fn cmd_pull(name: &SessionName, branch: &str, filter: Option<&s
                     // Auto-reconcile via VM: inject + extract + merge
                     let mut vm = build_vm_from_plan(name, branch, &plan.action, &repo_paths);
                     let ops = vec![
-                        git_sandbox::vm::Op::Inject { repo: repo_name.clone(), branch: branch.to_string() },
-                        git_sandbox::vm::Op::Extract { repo: repo_name.clone(), session_branch: name.to_string() },
+                        gitvm::vm::Op::Inject { repo: repo_name.clone(), branch: branch.to_string() },
+                        gitvm::vm::Op::Extract { repo: repo_name.clone(), session_branch: name.to_string() },
                     ];
                     let result = vm.run(&backend, ops).await;
                     if result.failed() > 0 {
@@ -395,19 +395,19 @@ pub(crate) async fn offer_reconciliation(
         eprintln!();
         eprintln!("  {} Reconciliation complete. Re-extracting...", "✓".green());
 
-        let backend = git_sandbox::vm::RealBackend::from_docker(lc.docker_client().clone(), name.as_str());
-        let mut vm = git_sandbox::vm::SyncVM::new(name.as_str(), branch);
+        let backend = gitvm::vm::RealBackend::from_docker(lc.docker_client().clone(), name.as_str());
+        let mut vm = gitvm::vm::SyncVM::new(name.as_str(), branch);
 
         for (repo_name, host_path, _) in conflicts {
-            vm.set_repo(repo_name, git_sandbox::vm::RepoVM::from_refs(
-                git_sandbox::vm::RefState::Stale, // container state changed by agent
-                git_sandbox::vm::RefState::Absent,
-                git_sandbox::vm::RefState::Absent,
+            vm.set_repo(repo_name, gitvm::vm::RepoVM::from_refs(
+                gitvm::vm::RefState::Stale, // container state changed by agent
+                gitvm::vm::RefState::Absent,
+                gitvm::vm::RefState::Absent,
                 Some(host_path.clone()),
             ));
 
             let result = vm.run(&backend, vec![
-                git_sandbox::vm::Op::Extract { repo: repo_name.clone(), session_branch: name.to_string() },
+                gitvm::vm::Op::Extract { repo: repo_name.clone(), session_branch: name.to_string() },
             ]).await;
 
             if result.succeeded() > 0 {

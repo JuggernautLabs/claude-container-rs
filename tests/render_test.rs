@@ -4,8 +4,8 @@
 //! and relative path edge cases.
 
 // We test the Display impls by importing the types from the crate
-use git_sandbox::types::git::{MergeOutcome, MergeBlocker};
-use git_sandbox::types::CommitHash;
+use gitvm::types::git::{MergeOutcome, MergeBlocker};
+use gitvm::types::CommitHash;
 
 // ============================================================================
 // MergeOutcome Display — human-readable output

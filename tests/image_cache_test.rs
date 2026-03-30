@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-use git_sandbox::lifecycle::{validation_cache_path, hash_string, VALIDATION_CACHE_TTL};
-use git_sandbox::types::{ImageRef, ImageValidation, BinaryCheck};
+use gitvm::lifecycle::{validation_cache_path, hash_string, VALIDATION_CACHE_TTL};
+use gitvm::types::{ImageRef, ImageValidation, BinaryCheck};
 
 /// Helper: build a minimal valid cache file content
 fn cache_content() -> String {
@@ -44,7 +44,7 @@ fn cache_expires_after_ttl() {
 
     // load_validation_cache should return None for expired cache
     let image_ref = ImageRef::new("test:latest");
-    let result = git_sandbox::lifecycle::load_validation_cache_standalone(image_id, &image_ref);
+    let result = gitvm::lifecycle::load_validation_cache_standalone(image_id, &image_ref);
     assert!(result.is_none(), "Expired cache should return None");
 
     cleanup_cache(image_id);
@@ -56,7 +56,7 @@ fn cache_valid_within_ttl() {
     let _path = write_cache_with_age(image_id, Duration::from_secs(3600)); // 1 hour ago
 
     let image_ref = ImageRef::new("test:latest");
-    let result = git_sandbox::lifecycle::load_validation_cache_standalone(image_id, &image_ref);
+    let result = gitvm::lifecycle::load_validation_cache_standalone(image_id, &image_ref);
     assert!(result.is_some(), "Fresh cache should return Some");
 
     let validation = result.unwrap();
@@ -77,11 +77,11 @@ fn cache_keyed_by_image_id_not_name() {
     let image_ref = ImageRef::new("myimage:latest");
 
     // Same image name, but different ID (image_id_b) → cache miss
-    let result_b = git_sandbox::lifecycle::load_validation_cache_standalone(image_id_b, &image_ref);
+    let result_b = gitvm::lifecycle::load_validation_cache_standalone(image_id_b, &image_ref);
     assert!(result_b.is_none(), "Different image ID should be a cache miss");
 
     // Original image ID → cache hit
-    let result_a = git_sandbox::lifecycle::load_validation_cache_standalone(image_id_a, &image_ref);
+    let result_a = gitvm::lifecycle::load_validation_cache_standalone(image_id_a, &image_ref);
     assert!(result_a.is_some(), "Original image ID should be a cache hit");
 
     cleanup_cache(image_id_a);
@@ -95,7 +95,7 @@ fn cache_missing_file_returns_none() {
     cleanup_cache(image_id);
 
     let image_ref = ImageRef::new("test:latest");
-    let result = git_sandbox::lifecycle::load_validation_cache_standalone(image_id, &image_ref);
+    let result = gitvm::lifecycle::load_validation_cache_standalone(image_id, &image_ref);
     assert!(result.is_none(), "Missing cache file should return None");
 }
 
@@ -106,7 +106,7 @@ fn cache_at_exact_ttl_boundary_expires() {
     let _path = write_cache_with_age(image_id, VALIDATION_CACHE_TTL);
 
     let image_ref = ImageRef::new("test:latest");
-    let result = git_sandbox::lifecycle::load_validation_cache_standalone(image_id, &image_ref);
+    let result = gitvm::lifecycle::load_validation_cache_standalone(image_id, &image_ref);
     assert!(result.is_none(), "Cache at exact TTL boundary should expire");
 
     cleanup_cache(image_id);

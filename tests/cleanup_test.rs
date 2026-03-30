@@ -53,7 +53,7 @@ async fn gc_removes_orphaned_throwaway_containers() {
     assert!(inspect.is_ok(), "throwaway container should exist before gc");
 
     // Run gc via the library function
-    let removed = git_sandbox::gc_throwaway_containers(&docker).await.expect("gc");
+    let removed = gitvm::gc_throwaway_containers(&docker).await.expect("gc");
     assert!(
         removed.iter().any(|name| name.contains("cc-gc-test-throwaway")),
         "gc should have removed our test container, got: {:?}",
@@ -103,7 +103,7 @@ async fn gc_preserves_session_containers() {
         .expect("create session container");
 
     // Run gc
-    let removed = git_sandbox::gc_throwaway_containers(&docker).await.expect("gc");
+    let removed = gitvm::gc_throwaway_containers(&docker).await.expect("gc");
 
     // Our session container should NOT be in the removed list
     assert!(
@@ -175,7 +175,7 @@ async fn cleanup_removes_session_throwaway_containers() {
 
     // Run session-scoped cleanup
     let removed =
-        git_sandbox::gc_session_throwaway_containers(&docker, &session_name)
+        gitvm::gc_session_throwaway_containers(&docker, &session_name)
             .await
             .expect("session gc");
 
@@ -223,7 +223,7 @@ async fn ls_active_filters_stale_sessions() {
     std::fs::write(&stale_meta, "# test\n").ok();
 
     // Get active sessions
-    let active = git_sandbox::list_active_sessions(&docker).await.expect("list active");
+    let active = gitvm::list_active_sessions(&docker).await.expect("list active");
 
     // Active session should be present
     assert!(
@@ -250,7 +250,7 @@ async fn ls_active_filters_stale_sessions() {
 #[test]
 fn throwaway_label_constant_matches() {
     assert_eq!(
-        git_sandbox::THROWAWAY_LABEL,
+        gitvm::THROWAWAY_LABEL,
         "claude-container.throwaway",
         "label constant must match what we use in tests"
     );

@@ -1,5 +1,5 @@
 mod common;
-use git_sandbox::types::git::*;
+use gitvm::types::git::*;
 use std::path::PathBuf;
 
 // ============================================================================
@@ -224,8 +224,8 @@ fn no_container_means_push_to_container() {
 
 use git2::Repository;
 use std::path::Path;
-use git_sandbox::sync::SyncEngine;
-use git_sandbox::types::git::MergeOutcome;
+use gitvm::sync::SyncEngine;
+use gitvm::types::git::MergeOutcome;
 
 // Use shared helpers from common module
 use common::{make_repo as make_test_repo, add_commit, git_branch as create_branch,

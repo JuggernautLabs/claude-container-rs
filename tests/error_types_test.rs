@@ -2,7 +2,7 @@
 //!
 //! Verifies that sync errors are exhaustively matchable without string matching.
 
-use git_sandbox::types::{
+use gitvm::types::{
     ContainerError,
     action::RepoSyncResult,
     git::MergeOutcome,
@@ -52,9 +52,9 @@ fn collect_conflicts_uses_typed_results_not_strings() {
     // Also: Pulled with MergeOutcome::Conflict carries files
     let pulled_with_conflict = RepoSyncResult::Pulled {
         repo_name: "other-repo".to_string(),
-        extract: git_sandbox::types::action::ExtractResult {
+        extract: gitvm::types::action::ExtractResult {
             commit_count: 5,
-            new_head: git_sandbox::types::CommitHash::new("abc123".to_string()),
+            new_head: gitvm::types::CommitHash::new("abc123".to_string()),
         },
         merge: MergeOutcome::Conflict {
             files: vec!["conflict.rs".to_string()],
@@ -134,8 +134,8 @@ fn inject_failed_is_distinct_from_extraction() {
 #[test]
 fn sync_result_conflicted_count() {
     // SyncResult can count conflicted repos
-    use git_sandbox::types::action::SyncResult;
-    use git_sandbox::types::SessionName;
+    use gitvm::types::action::SyncResult;
+    use gitvm::types::SessionName;
 
     let result = SyncResult {
         session_name: SessionName::new("test-session".to_string()),

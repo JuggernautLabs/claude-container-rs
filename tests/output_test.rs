@@ -145,7 +145,7 @@ async fn output_entrypoint_missing_token() {
 }
 
 // ============================================================================
-// Binary output — what does `git-sandbox start` print?
+// Binary output — what does `gitvm start` print?
 // ============================================================================
 
 #[tokio::test]
@@ -161,7 +161,7 @@ async fn output_start_new_session() {
         .env("TERM", "xterm-256color")
         .env("NO_COLOR", "1")  // disable color codes for clean comparison
         .output()
-        .expect("failed to run git-sandbox");
+        .expect("failed to run gitvm");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -216,7 +216,7 @@ async fn output_start_nonexistent_no_repo() {
         .env("NO_COLOR", "1")
         .current_dir(std::env::temp_dir())  // not a git repo
         .output()
-        .expect("failed to run git-sandbox");
+        .expect("failed to run gitvm");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -249,8 +249,8 @@ async fn output_start_nonexistent_no_repo() {
 #[tokio::test]
 #[ignore]
 async fn output_start_already_running() {
-    // Create a running container with the exact name git-sandbox expects,
-    // then run `git-sandbox start` against it and capture what comes out.
+    // Create a running container with the exact name gitvm expects,
+    // then run `gitvm start` against it and capture what comes out.
     let d = docker();
     let session_name = format!("out-running-{}", std::process::id());
     let container_name = format!("claude-session-ctr-{}", session_name);
@@ -293,7 +293,7 @@ async fn output_start_already_running() {
         .env("TERM", "xterm-256color")
         .env("NO_COLOR", "1")
         .output()
-        .expect("failed to run git-sandbox");
+        .expect("failed to run gitvm");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -491,7 +491,7 @@ fn output_reset_terminal_fixes_raw_mode() {
 }
 
 /// Verify the actual binary resets raw mode on startup.
-/// Runs: enable raw mode → run git-sandbox → check that git-sandbox restored cooked mode.
+/// Runs: enable raw mode → run gitvm → check that gitvm restored cooked mode.
 #[tokio::test]
 #[ignore]
 async fn output_binary_resets_raw_mode() {
@@ -501,8 +501,8 @@ async fn output_binary_resets_raw_mode() {
 
     // Use `script` with a wrapper that:
     // 1. Enables raw mode
-    // 2. Runs git-sandbox (which should reset)
-    // 3. Checks terminal state AFTER git-sandbox exits
+    // 2. Runs gitvm (which should reset)
+    // 3. Checks terminal state AFTER gitvm exits
     // 4. Outputs whether OPOST is set (cooked) or not (still raw)
     let check_script = format!(
         "stty raw -echo 2>/dev/null; \
@@ -524,11 +524,11 @@ async fn output_binary_resets_raw_mode() {
     let cleaned = stdout.replace('\r', "").replace('\n', " ");
     println!("stty check: '{}'", cleaned.trim());
 
-    // After git-sandbox runs, the terminal should have opost enabled
+    // After gitvm runs, the terminal should have opost enabled
     // (meaning output processing is on, \n → \r\n)
     assert!(
         cleaned.contains("opost"),
-        "Terminal should be in cooked mode (opost) after git-sandbox exits. Got: '{}'",
+        "Terminal should be in cooked mode (opost) after gitvm exits. Got: '{}'",
         cleaned.trim()
     );
 
@@ -590,15 +590,15 @@ fn find_binary() -> std::path::PathBuf {
     // Try debug build first, then release, then cargo bin
     let candidates = [
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target/debug/git-sandbox"),
+            .join("target/debug/gitvm"),
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target/release/git-sandbox"),
+            .join("target/release/gitvm"),
         dirs::home_dir()
             .unwrap_or_default()
-            .join(".cargo/bin/git-sandbox"),
+            .join(".cargo/bin/gitvm"),
     ];
 
     candidates.into_iter()
         .find(|p| p.exists())
-        .expect("Can't find git-sandbox binary. Run `cargo build` first.")
+        .expect("Can't find gitvm binary. Run `cargo build` first.")
 }

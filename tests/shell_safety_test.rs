@@ -1,7 +1,7 @@
 //! GS-9: Shell safety tests — command escaping, base64, config writing.
 
 // We test the public helpers via the lib crate.
-use git_sandbox::shell_safety;
+use gitvm::shell_safety;
 
 #[test]
 fn exec_single_arg_uses_bash_c() {

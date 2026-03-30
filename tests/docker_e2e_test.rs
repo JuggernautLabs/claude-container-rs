@@ -12,13 +12,13 @@ use git2::Repository;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use git_sandbox::sync::SyncEngine;
-use git_sandbox::types::SessionName;
-use git_sandbox::vm::*;
+use gitvm::sync::SyncEngine;
+use gitvm::types::SessionName;
+use gitvm::vm::*;
 
 /// Create a repo in ~/.cache so Docker can see it (macOS /var/folders not shared)
 fn colima_visible_repo(name: &str) -> (PathBuf, impl Drop) {
-    let cache_dir = dirs::home_dir().unwrap().join(".cache/git-sandbox/test-repos");
+    let cache_dir = dirs::home_dir().unwrap().join(".cache/gitvm/test-repos");
     std::fs::create_dir_all(&cache_dir).unwrap();
     let repo_path = cache_dir.join(name);
     let _ = std::fs::remove_dir_all(&repo_path);
@@ -240,7 +240,7 @@ async fn push_then_push_is_idempotent() {
     let plan = engine.plan_sync(&name, "main", &repos).await.unwrap();
 
     let has_push_work = plan.action.repo_actions.iter()
-        .any(|a| !matches!(a.state.push_action(), git_sandbox::types::git::PushAction::Skip));
+        .any(|a| !matches!(a.state.push_action(), gitvm::types::git::PushAction::Skip));
     assert!(!has_push_work, "second push should show no work");
 }
 
@@ -332,7 +332,7 @@ async fn plan_reflects_actual_state() {
 
     // Container ahead → pull should be Extract or CloneToHost
     let pull = action.state.pull_action();
-    assert!(!matches!(pull, git_sandbox::types::git::PullAction::Skip),
+    assert!(!matches!(pull, gitvm::types::git::PullAction::Skip),
         "container has work, pull should not be Skip, got {:?}", pull);
 
     // Build VM and verify plan_pull generates ops
@@ -406,17 +406,17 @@ async fn vm_push_inject_failure_reports_error() {
     add_commit(&repo_path, "new work", &[("new.txt", "new content")]);
 
     // Try VM push — inject into dirty container should fail
-    let backend = git_sandbox::vm::RealBackend::from_docker(session.docker.clone(), &session.name);
-    let mut vm = git_sandbox::vm::SyncVM::new(&session.name, "main");
-    vm.set_repo("test-repo", git_sandbox::vm::RepoVM::from_refs(
-        git_sandbox::vm::RefState::At("old".into()),
-        git_sandbox::vm::RefState::At("old".into()),
-        git_sandbox::vm::RefState::At("new".into()),
+    let backend = gitvm::vm::RealBackend::from_docker(session.docker.clone(), &session.name);
+    let mut vm = gitvm::vm::SyncVM::new(&session.name, "main");
+    vm.set_repo("test-repo", gitvm::vm::RepoVM::from_refs(
+        gitvm::vm::RefState::At("old".into()),
+        gitvm::vm::RefState::At("old".into()),
+        gitvm::vm::RefState::At("new".into()),
         Some(repo_path.clone()),
     ));
 
     let result = vm.run(&backend, vec![
-        git_sandbox::vm::Op::Inject { repo: "test-repo".into(), branch: "main".into() },
+        gitvm::vm::Op::Inject { repo: "test-repo".into(), branch: "main".into() },
     ]).await;
 
     // Should fail but not panic

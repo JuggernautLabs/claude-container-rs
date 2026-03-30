@@ -1,10 +1,10 @@
 //! Preview validation — verify that what we SHOW matches what IS.
 //! Compares sync plan output against direct git/docker queries.
 
-use git_sandbox::lifecycle::Lifecycle;
-use git_sandbox::session::SessionManager;
-use git_sandbox::sync::SyncEngine;
-use git_sandbox::types::*;
+use gitvm::lifecycle::Lifecycle;
+use gitvm::session::SessionManager;
+use gitvm::sync::SyncEngine;
+use gitvm::types::*;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -197,7 +197,7 @@ async fn test_render_sync_plan_for_review() {
     let plan = engine.plan_sync(&session, "main", &repo_paths).await.unwrap();
 
     println!("\n=== RENDERED SYNC PLAN (for human review) ===\n");
-    git_sandbox::render::sync_plan_directed(&plan.action, "status");
+    gitvm::render::sync_plan_directed(&plan.action, "status");
     println!("\n=== END RENDERED OUTPUT ===\n");
 
     // Print detailed breakdown for each non-skip repo

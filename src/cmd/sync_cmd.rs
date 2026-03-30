@@ -19,7 +19,7 @@ pub(crate) async fn cmd_sync(name: &SessionName, branch: &str, filter: Option<&s
 
     // VM planning
     let mut vm = build_vm_from_plan(name, branch, &plan.action, &repo_paths);
-    let sync_ops = git_sandbox::vm::programs::plan_sync(&vm);
+    let sync_ops = gitvm::vm::programs::plan_sync(&vm);
     let has_work = !sync_ops.is_empty();
 
     render::sync_plan_directed(&plan.action, "sync");
@@ -27,7 +27,7 @@ pub(crate) async fn cmd_sync(name: &SessionName, branch: &str, filter: Option<&s
     if dry_run {
         if !sync_ops.is_empty() {
             eprintln!("\nProgram ({} ops):", sync_ops.len());
-            eprint!("{}", git_sandbox::vm::display::render_program(&sync_ops, 2));
+            eprint!("{}", gitvm::vm::display::render_program(&sync_ops, 2));
         }
         return Ok(());
     }
@@ -43,7 +43,7 @@ pub(crate) async fn cmd_sync(name: &SessionName, branch: &str, filter: Option<&s
 
     // Execute via VM interpreter
     eprintln!();
-    let backend = git_sandbox::vm::RealBackend::from_docker(lc.docker_client().clone(), name.as_str());
+    let backend = gitvm::vm::RealBackend::from_docker(lc.docker_client().clone(), name.as_str());
     let result = vm.run(&backend, sync_ops).await;
 
     // Render results
@@ -52,7 +52,7 @@ pub(crate) async fn cmd_sync(name: &SessionName, branch: &str, filter: Option<&s
             eprintln!("  {} {}", colored::Colorize::green("✓"), outcome.op_description);
         } else {
             match &outcome.result {
-                git_sandbox::vm::StepResult::BackendError(e) => {
+                gitvm::vm::StepResult::BackendError(e) => {
                     eprintln!("  {} {} — {}", colored::Colorize::red("✗"), outcome.op_description, e);
                 }
                 _ => {
@@ -85,8 +85,8 @@ pub(crate) fn build_vm_from_plan(
     branch: &str,
     plan: &SessionSyncPlan,
     repo_paths: &std::collections::BTreeMap<String, std::path::PathBuf>,
-) -> git_sandbox::vm::SyncVM {
-    use git_sandbox::vm::{SyncVM, RepoVM, RefState};
+) -> gitvm::vm::SyncVM {
+    use gitvm::vm::{SyncVM, RepoVM, RefState};
 
     let mut vm = SyncVM::new(name.as_str(), branch);
     for action in &plan.repo_actions {

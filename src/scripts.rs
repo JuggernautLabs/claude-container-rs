@@ -26,7 +26,7 @@ pub const SCRIPTS: &[(&str, &str)] = &[
 /// Write all embedded scripts to a stable cache directory.
 /// Returns the directory path for use as Docker bind-mount source.
 ///
-/// Uses `~/.cache/git-sandbox/scripts/` — deterministic so the staleness
+/// Uses `~/.cache/gitvm/scripts/` — deterministic so the staleness
 /// check can compare mount paths across process invocations.
 /// Scripts are overwritten every time (handles binary upgrades).
 pub fn materialize() -> anyhow::Result<PathBuf> {
@@ -47,7 +47,7 @@ pub fn materialize() -> anyhow::Result<PathBuf> {
 pub fn cache_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".cache/git-sandbox/scripts")
+        .join(".cache/gitvm/scripts")
 }
 
 /// Check whether scripts on disk match what's embedded in the binary.

@@ -197,7 +197,7 @@ pub(crate) async fn cmd_session_rebuild(name: &SessionName, auto_yes: bool) -> a
     lc.remove_container(&container_name).await?;
     eprintln!("  {} Container removed. Volumes preserved.", "✓".green());
 
-    eprintln!("  Run `git-sandbox start -s {}` to launch.", name);
+    eprintln!("  Run `gitvm start -s {}` to launch.", name);
     Ok(())
 }
 
@@ -336,7 +336,7 @@ done
     eprintln!();
     if problems > 0 {
         eprintln!("  {} {} volume(s) have ownership problems.", "⚠".yellow(), problems);
-        eprintln!("  Run `git-sandbox session -s {} fix` to repair.", name);
+        eprintln!("  Run `gitvm session -s {} fix` to repair.", name);
     } else {
         eprintln!("  {} All volumes clean.", "✓".green());
     }

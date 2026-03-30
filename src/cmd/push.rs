@@ -1,6 +1,6 @@
 use crate::types::*;
 use crate::render;
-use git_sandbox::vm::{self, programs::plan_push, RealBackend, display::render_program};
+use gitvm::vm::{self, programs::plan_push, RealBackend, display::render_program};
 use colored::Colorize;
 
 use super::confirm;

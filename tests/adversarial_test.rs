@@ -7,7 +7,7 @@
 
 mod common;
 use common::*;
-use git_sandbox::vm::*;
+use gitvm::vm::*;
 use git2::Repository;
 use std::path::PathBuf;
 

@@ -84,7 +84,7 @@ pub(crate) async fn cmd_start(
         use std::io::Write;
         std::io::stderr().flush().ok();
         container::attach_to_running(&lc, &name.container_name(), replay_logs).await?;
-        eprintln!("  To reattach: git-sandbox session -s {} start -a", name);
+        eprintln!("  To reattach: gitvm session -s {} start -a", name);
         return Ok(());
     }
 

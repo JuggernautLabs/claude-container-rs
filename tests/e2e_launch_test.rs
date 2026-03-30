@@ -24,7 +24,7 @@ fn docker() -> Docker {
 }
 
 fn script_dir() -> PathBuf {
-    git_sandbox::scripts::materialize().expect("materialize scripts")
+    gitvm::scripts::materialize().expect("materialize scripts")
 }
 
 fn token() -> String {
@@ -318,9 +318,9 @@ async fn test_stale_detection_correct_container_passes() {
         .await.expect("create");
 
     // Use our lifecycle to check staleness
-    let lc = git_sandbox::lifecycle::Lifecycle::new().expect("lifecycle");
-    let image = git_sandbox::types::ImageRef::new(BASE_IMAGE);
-    let session = git_sandbox::types::SessionName::new(&test_name);
+    let lc = gitvm::lifecycle::Lifecycle::new().expect("lifecycle");
+    let image = gitvm::types::ImageRef::new(BASE_IMAGE);
+    let session = gitvm::types::SessionName::new(&test_name);
     let container_name = session.container_name();
 
     // This should NOT work because the container name doesn't match session naming
@@ -347,11 +347,11 @@ async fn test_output_formatting_clean() {
 
     let binary = std::env::current_exe().unwrap()
         .parent().unwrap().parent().unwrap()
-        .join("debug/git-sandbox");
+        .join("debug/gitvm");
 
     // If binary doesn't exist, try release
     let binary = if binary.exists() { binary } else {
-        PathBuf::from(std::env::var("HOME").unwrap()).join(".cargo/bin/git-sandbox")
+        PathBuf::from(std::env::var("HOME").unwrap()).join(".cargo/bin/gitvm")
     };
 
     // Run against synapse-cc-ux (known running container) — should return quickly
@@ -361,7 +361,7 @@ async fn test_output_formatting_clean() {
         .env("TERM", "xterm-256color")
         .env("DOCKER_HOST", std::env::var("DOCKER_HOST").unwrap_or_default())
         .output()
-        .expect("failed to run git-sandbox");
+        .expect("failed to run gitvm");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     println!("=== stderr ===\n{}\n=== end ===", stderr);
