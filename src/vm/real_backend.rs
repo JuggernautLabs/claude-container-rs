@@ -5,6 +5,7 @@
 //! or git2 method.
 
 use std::path::Path;
+use bollard::Docker;
 use crate::sync::SyncEngine;
 use crate::types::SessionName;
 use super::ops::{Mount, AgentTask, AncestryResult};
@@ -20,6 +21,15 @@ pub struct RealBackend {
 impl RealBackend {
     pub fn new(engine: SyncEngine, session: SessionName) -> Self {
         Self { engine, session }
+    }
+
+    /// Create from a Docker client and session name.
+    /// Constructs a SyncEngine internally.
+    pub fn from_docker(docker: Docker, session_name: &str) -> Self {
+        Self {
+            engine: SyncEngine::new(docker),
+            session: SessionName::new(session_name),
+        }
     }
 }
 
