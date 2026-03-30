@@ -14,9 +14,13 @@ pub mod ops;
 pub mod backend;
 pub mod interpreter;
 pub mod git2_backend;
+pub mod programs;
+pub mod display;
 
 pub use state::*;
 pub use ops::*;
 pub use backend::*;
 pub use interpreter::*;
 pub use git2_backend::Git2Backend;
+pub use programs::*;
+pub use display::render_program;

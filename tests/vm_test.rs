@@ -993,3 +993,241 @@ fn git2_docker_ops_return_errors() {
     // prompt_user auto-confirms in Git2Backend
     assert_eq!(backend.prompt_user("test").unwrap(), true);
 }
+
+// ============================================================================
+// Program generator tests — plan_push, plan_pull, plan_sync
+// ============================================================================
+
+#[test]
+fn plan_push_injects_when_target_differs() {
+    let mut vm = SyncVM::new("session", "main");
+    vm.set_repo("alpha", RepoVM::from_refs(
+        RefState::At("aaa".into()),  // container
+        RefState::At("aaa".into()),  // session (same as container)
+        RefState::At("bbb".into()),  // target ahead
+        Some(PathBuf::from("/tmp/alpha")),
+    ));
+
+    let ops = plan_push(&vm);
+    assert!(!ops.is_empty(), "should have inject ops");
+    // Should contain a RunContainer (inject) and extract ops (re-extract)
+    assert!(ops.iter().any(|op| matches!(op, Op::RunContainer { .. })));
+    assert!(ops.iter().any(|op| matches!(op, Op::BundleCreate { .. })));
+}
+
+#[test]
+fn plan_push_skips_when_in_sync() {
+    let mut vm = SyncVM::new("session", "main");
+    vm.set_repo("alpha", RepoVM::from_refs(
+        RefState::At("aaa".into()),
+        RefState::At("aaa".into()),
+        RefState::At("aaa".into()),  // all same
+        Some(PathBuf::from("/tmp/alpha")),
+    ));
+
+    let ops = plan_push(&vm);
+    assert!(ops.is_empty(), "nothing to push when in sync");
+}
+
+#[test]
+fn plan_push_skips_host_dirty() {
+    let mut vm = SyncVM::new("session", "main");
+    let mut repo = RepoVM::from_refs(
+        RefState::At("aaa".into()),
+        RefState::At("aaa".into()),
+        RefState::At("bbb".into()),
+        Some(PathBuf::from("/tmp/alpha")),
+    );
+    repo.host_clean = false;  // host dirty doesn't block push
+    vm.set_repo("alpha", repo);
+
+    let ops = plan_push(&vm);
+    assert!(!ops.is_empty(), "host dirty should not block push");
+}
+
+#[test]
+fn plan_pull_extracts_when_container_ahead() {
+    let mut vm = SyncVM::new("session", "main");
+    vm.set_repo("alpha", RepoVM::from_refs(
+        RefState::At("bbb".into()),  // container ahead
+        RefState::At("aaa".into()),  // session behind
+        RefState::At("aaa".into()),  // target = session
+        Some(PathBuf::from("/tmp/alpha")),
+    ));
+
+    let ops = plan_pull(&vm);
+    assert!(ops.iter().any(|op| matches!(op, Op::BundleCreate { .. })), "should extract");
+}
+
+#[test]
+fn plan_pull_merges_when_session_ahead_of_target() {
+    let mut vm = SyncVM::new("session", "main");
+    vm.set_repo("alpha", RepoVM::from_refs(
+        RefState::At("bbb".into()),  // container
+        RefState::At("bbb".into()),  // session = container
+        RefState::At("aaa".into()),  // target behind
+        Some(PathBuf::from("/tmp/alpha")),
+    ));
+
+    let ops = plan_pull(&vm);
+    assert!(ops.iter().any(|op| matches!(op, Op::TryMerge { .. })), "should merge");
+}
+
+#[test]
+fn plan_pull_skips_when_in_sync() {
+    let mut vm = SyncVM::new("session", "main");
+    vm.set_repo("alpha", RepoVM::from_refs(
+        RefState::At("aaa".into()),
+        RefState::At("aaa".into()),
+        RefState::At("aaa".into()),
+        Some(PathBuf::from("/tmp/alpha")),
+    ));
+
+    let ops = plan_pull(&vm);
+    assert!(ops.is_empty(), "nothing to pull when in sync");
+}
+
+#[test]
+fn plan_pull_blocked_when_host_dirty() {
+    let mut vm = SyncVM::new("session", "main");
+    let mut repo = RepoVM::from_refs(
+        RefState::At("bbb".into()),
+        RefState::At("aaa".into()),
+        RefState::At("aaa".into()),
+        Some(PathBuf::from("/tmp/alpha")),
+    );
+    repo.host_clean = false;
+    vm.set_repo("alpha", repo);
+
+    let ops = plan_pull(&vm);
+    assert!(ops.is_empty(), "host dirty should block pull");
+}
+
+#[test]
+fn plan_sync_push_before_pull() {
+    let mut vm = SyncVM::new("session", "main");
+    vm.set_repo("alpha", RepoVM::from_refs(
+        RefState::At("bbb".into()),  // container ahead (pull needed)
+        RefState::At("aaa".into()),  // session
+        RefState::At("ccc".into()),  // target different (push needed)
+        Some(PathBuf::from("/tmp/alpha")),
+    ));
+
+    let ops = plan_sync(&vm);
+    // Find first RunContainer (inject/push) and first BundleCreate (extract/pull)
+    let first_run = ops.iter().position(|op| matches!(op, Op::RunContainer { .. }));
+    let first_bundle = ops.iter().position(|op| matches!(op, Op::BundleCreate { .. }));
+
+    // If both exist, push (RunContainer) should come before pull (BundleCreate)
+    if let (Some(push_idx), Some(pull_idx)) = (first_run, first_bundle) {
+        assert!(push_idx < pull_idx, "push ops should come before pull ops in sync");
+    }
+}
+
+#[test]
+fn plan_sync_empty_when_in_sync() {
+    let mut vm = SyncVM::new("session", "main");
+    vm.set_repo("alpha", RepoVM::from_refs(
+        RefState::At("aaa".into()),
+        RefState::At("aaa".into()),
+        RefState::At("aaa".into()),
+        Some(PathBuf::from("/tmp/alpha")),
+    ));
+
+    let ops = plan_sync(&vm);
+    assert!(ops.is_empty());
+}
+
+// ============================================================================
+// Compound builder tests
+// ============================================================================
+
+#[test]
+fn ops_extract_produces_bundle_sequence() {
+    let ops = ops_extract("alpha", "session");
+    assert_eq!(ops.len(), 3);
+    assert!(matches!(ops[0], Op::BundleCreate { .. }));
+    assert!(matches!(ops[1], Op::BundleFetch { .. }));
+    assert!(matches!(ops[2], Op::RefWrite { .. }));
+}
+
+#[test]
+fn ops_inject_produces_run_container() {
+    let ops = ops_inject("alpha", "main");
+    assert_eq!(ops.len(), 1);
+    assert!(matches!(ops[0], Op::RunContainer { .. }));
+}
+
+#[test]
+fn ops_merge_produces_try_merge() {
+    let op = ops_merge("alpha", "session_h", "target_h", "main", true);
+    assert!(matches!(op, Op::TryMerge { .. }));
+    if let Op::TryMerge { on_clean, on_error, .. } = &op {
+        assert!(!on_clean.is_empty(), "clean path should have ops");
+        assert!(!on_error.is_empty(), "error path should have cleanup");
+    }
+}
+
+#[test]
+fn ops_clone_produces_run_container() {
+    let ops = ops_clone("alpha");
+    assert_eq!(ops.len(), 1);
+    assert!(matches!(ops[0], Op::RunContainer { .. }));
+}
+
+#[test]
+fn ops_reconcile_with_agent_has_agent_run() {
+    let ops = ops_reconcile_with_agent("alpha", "session", "target_h", "main", vec!["file.rs".into()]);
+    assert!(ops.iter().any(|op| matches!(op, Op::AgentRun { .. })), "should have agent run");
+}
+
+// ============================================================================
+// Display tests
+// ============================================================================
+
+#[test]
+fn display_primitive_ops() {
+    let ops = vec![
+        Op::ref_read(Side::Host, "alpha", "refs/heads/main"),
+        Op::ref_write(Side::Host, "alpha", "refs/heads/main", "abc1234def"),
+        Op::bundle_create("alpha"),
+        Op::checkout(Side::Container, "alpha", "HEAD"),
+        Op::confirm("proceed?"),
+    ];
+
+    for op in &ops {
+        let s = format!("{}", op);
+        assert!(!s.is_empty(), "display should produce output for {:?}", op);
+    }
+}
+
+#[test]
+fn display_compound_ops() {
+    let op = ops_merge("alpha", "session_h", "target_h", "main", true);
+    let s = format!("{}", op);
+    assert!(s.contains("try-merge"), "display: {}", s);
+}
+
+#[test]
+fn render_program_shows_numbered_steps() {
+    let ops = vec![
+        Op::bundle_create("alpha"),
+        Op::bundle_fetch("alpha", "/tmp/bundle"),
+        Op::ref_write(Side::Host, "alpha", "refs/heads/session", "abc"),
+    ];
+    let output = render_program(&ops, 0);
+    assert!(output.contains("1."));
+    assert!(output.contains("2."));
+    assert!(output.contains("3."));
+    assert!(output.contains("bundle-create"));
+    assert!(output.contains("bundle-fetch"));
+}
+
+#[test]
+fn render_program_shows_compound_branches() {
+    let op = ops_merge("alpha", "s", "t", "main", true);
+    let output = render_program(&[op], 0);
+    assert!(output.contains("try-merge"));
+    assert!(output.contains("on clean:"));
+    assert!(output.contains("on error:"));
+}
