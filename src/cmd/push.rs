@@ -13,8 +13,16 @@ pub(crate) async fn cmd_push(name: &SessionName, branch: &str, filter: Option<&s
     let mut vm = build_vm_from_plan(name, branch, &plan.action, &repo_paths);
     let mut push_ops = plan_push(&vm);
 
-    // Handle --force: add ForceInject for blocked repos
     if force {
+        // Replace all Inject with ForceInject, and add ForceInject for blocked repos
+        push_ops = push_ops.into_iter().map(|op| {
+            match op {
+                vm::Op::Inject { repo, branch } => vm::Op::ForceInject { repo, branch },
+                other => other,
+            }
+        }).collect();
+
+        // Also add ForceInject + Extract for blocked repos (not in plan_push output)
         for action in &plan.action.repo_actions {
             if matches!(action.state.push_action(), PushAction::Blocked(_)) {
                 push_ops.push(vm::Op::ForceInject {
