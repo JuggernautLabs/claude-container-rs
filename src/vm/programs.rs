@@ -14,12 +14,13 @@ use super::state::*;
 /// Extract: move container HEAD to host session branch.
 /// bundle_create → bundle_fetch → ref_write(session)
 pub fn ops_extract(repo: &str, session_name: &str) -> Vec<Op> {
+    let session_branch = super::state::BranchName::new(session_name);
     vec![
         Op::BundleCreate { repo: repo.into() },
         Op::BundleFetch { repo: repo.into(), bundle_path: "BUNDLE".into() },
         Op::ref_write(
             Side::Host, repo,
-            &format!("refs/heads/{}", session_name),
+            &session_branch.as_ref_name(),
             "FETCHED",
         ),
     ]
@@ -59,6 +60,7 @@ pub fn ops_merge(
     target_branch: &str,
     squash: bool,
 ) -> Op {
+    let branch = super::state::BranchName::new(target_branch);
     let msg = if squash {
         format!("squash: session into {}", target_branch)
     } else {
@@ -70,17 +72,17 @@ pub fn ops_merge(
         ours: target_head.into(),
         theirs: session_head.into(),
         on_clean: vec![
-            Op::checkout(Side::Host, repo, &format!("refs/heads/{}", target_branch)),
+            Op::checkout(Side::Host, repo, &branch.as_ref_name()),
             Op::commit(repo, "MERGED_TREE", &[target_head], &msg),
             Op::ref_write(
                 Side::Host, repo,
-                &format!("refs/heads/{}", target_branch),
+                &branch.as_ref_name(),
                 "NEW_COMMIT",
             ),
         ],
         on_conflict: vec![],  // caller decides: agent or skip
         on_error: vec![
-            Op::checkout(Side::Host, repo, &format!("refs/heads/{}", target_branch)),
+            Op::checkout(Side::Host, repo, &branch.as_ref_name()),
         ],
     }
 }
@@ -165,12 +167,12 @@ pub fn plan_push(vm: &SyncVM) -> Vec<Op> {
         let push = repo_push_action(repo, &vm.target_branch);
         match push {
             PushIntent::Inject => {
-                ops.push(Op::Inject { repo: name.clone(), branch: vm.target_branch.clone() });
+                ops.push(Op::Inject { repo: name.0.clone(), branch: vm.target_branch.0.clone() });
                 // Re-extract after inject to keep session in sync
-                ops.push(Op::Extract { repo: name.clone(), session_branch: vm.session_name.clone() });
+                ops.push(Op::Extract { repo: name.0.clone(), session_branch: vm.session_name.clone() });
             }
             PushIntent::Clone => {
-                ops.extend(ops_clone(name));
+                ops.extend(ops_clone(&name.0));
             }
             PushIntent::Skip | PushIntent::Blocked(_) => {}
         }
@@ -188,30 +190,30 @@ pub fn plan_pull(vm: &SyncVM) -> Vec<Op> {
         let pull = repo_pull_action(repo);
         match pull {
             PullIntent::Extract => {
-                extract_ops.push(Op::Extract { repo: name.clone(), session_branch: vm.session_name.clone() });
+                extract_ops.push(Op::Extract { repo: name.0.clone(), session_branch: vm.session_name.clone() });
                 if let (RefState::At(s), RefState::At(t)) = (&repo.session, &repo.target) {
-                    merge_ops.push(ops_merge(name, s, t, &vm.target_branch, true));
+                    merge_ops.push(ops_merge(&name.0, s, t, &vm.target_branch, true));
                 }
             }
             PullIntent::MergeToTarget => {
                 if let (RefState::At(s), RefState::At(t)) = (&repo.session, &repo.target) {
-                    merge_ops.push(ops_merge(name, s, t, &vm.target_branch, true));
+                    merge_ops.push(ops_merge(&name.0, s, t, &vm.target_branch, true));
                 }
             }
             PullIntent::CloneToHost => {
-                extract_ops.push(Op::Extract { repo: name.clone(), session_branch: vm.session_name.clone() });
+                extract_ops.push(Op::Extract { repo: name.0.clone(), session_branch: vm.session_name.clone() });
             }
             PullIntent::Reconcile { has_conflicts, conflict_files } => {
                 if has_conflicts {
                     if let RefState::At(t) = &repo.target {
                         extract_ops.extend(ops_reconcile_with_agent(
-                            name, &vm.session_name, t, &vm.target_branch, conflict_files,
+                            &name.0, &vm.session_name, t, &vm.target_branch, conflict_files,
                         ));
                     }
                 } else {
                     if let (RefState::At(s), RefState::At(t)) = (&repo.session, &repo.target) {
                         extract_ops.extend(ops_reconcile_clean(
-                            name, &vm.session_name, s, t, &vm.target_branch,
+                            &name.0, &vm.session_name, s, t, &vm.target_branch,
                         ));
                     }
                 }
@@ -259,7 +261,7 @@ pub enum PullIntent {
 }
 
 /// Derive push intent from repo state.
-pub fn repo_push_action(repo: &RepoVM, target_branch: &str) -> PushIntent {
+pub fn repo_push_action(repo: &RepoVM, target_branch: &BranchName) -> PushIntent {
     // Container-side blockers block push
     if !repo.container_clean {
         return PushIntent::Blocked("container dirty".into());

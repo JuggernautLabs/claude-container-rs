@@ -13,6 +13,7 @@ pub mod state;
 pub mod ops;
 pub mod backend;
 pub mod interpreter;
+pub mod git2_ops;
 pub mod git2_backend;
 pub mod real_backend;
 pub mod programs;

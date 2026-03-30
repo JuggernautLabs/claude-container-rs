@@ -3,12 +3,41 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+// ============================================================================
+// Newtypes — strong typing for domain values
+// ============================================================================
+
+/// Strongly-typed repo name.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RepoName(pub String);
+impl RepoName {
+    pub fn new(s: impl Into<String>) -> Self { Self(s.into()) }
+    pub fn as_str(&self) -> &str { &self.0 }
+}
+impl std::fmt::Display for RepoName { fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { write!(f, "{}", self.0) } }
+impl std::ops::Deref for RepoName { type Target = str; fn deref(&self) -> &str { &self.0 } }
+
+/// Branch name (e.g., "main", "session-name").
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BranchName(pub String);
+impl BranchName {
+    pub fn new(s: impl Into<String>) -> Self { Self(s.into()) }
+    pub fn as_str(&self) -> &str { &self.0 }
+    pub fn as_ref_name(&self) -> String { format!("refs/heads/{}", self.0) }
+}
+impl std::fmt::Display for BranchName { fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { write!(f, "{}", self.0) } }
+impl std::ops::Deref for BranchName { type Target = str; fn deref(&self) -> &str { &self.0 } }
+
+// ============================================================================
+// VM state
+// ============================================================================
+
 /// The full VM state: all repos + execution trace.
 #[derive(Debug, Clone)]
 pub struct SyncVM {
-    pub session_name: String,
-    pub target_branch: String,
-    pub repos: BTreeMap<String, RepoVM>,
+    pub session_name: String,       // keep as String for now (SessionName is in types/)
+    pub target_branch: BranchName,  // strongly-typed branch name
+    pub repos: BTreeMap<RepoName, RepoVM>,  // strongly-typed repo names
     pub trace: Vec<TraceEntry>,
 }
 
@@ -33,25 +62,27 @@ pub struct RepoVM {
     pub host_path: Option<PathBuf>,
 }
 
-/// A git reference: either pointing at a commit or absent.
+/// A git reference: either pointing at a commit, absent, or stale.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RefState {
     /// Points at a known commit
     At(String),
     /// Branch/ref doesn't exist
     Absent,
+    /// Was at a known value but changed by an untracked operation (e.g., inject)
+    Stale,
 }
 
 impl RefState {
     pub fn hash(&self) -> Option<&str> {
         match self {
             Self::At(h) => Some(h),
-            Self::Absent => None,
+            Self::Absent | Self::Stale => None,
         }
     }
 
     pub fn is_present(&self) -> bool {
-        matches!(self, Self::At(_))
+        matches!(self, Self::At(_) | Self::Stale)
     }
 }
 
@@ -100,7 +131,7 @@ impl SyncVM {
     pub fn new(session_name: &str, target_branch: &str) -> Self {
         Self {
             session_name: session_name.to_string(),
-            target_branch: target_branch.to_string(),
+            target_branch: BranchName::new(target_branch),
             repos: BTreeMap::new(),
             trace: Vec::new(),
         }
@@ -108,17 +139,17 @@ impl SyncVM {
 
     /// Add or update a repo's state.
     pub fn set_repo(&mut self, name: &str, state: RepoVM) {
-        self.repos.insert(name.to_string(), state);
+        self.repos.insert(RepoName::new(name), state);
     }
 
     /// Get a repo's state.
     pub fn repo(&self, name: &str) -> Option<&RepoVM> {
-        self.repos.get(name)
+        self.repos.get(&RepoName::new(name))
     }
 
     /// Get a mutable reference to a repo's state.
     pub fn repo_mut(&mut self, name: &str) -> Option<&mut RepoVM> {
-        self.repos.get_mut(name)
+        self.repos.get_mut(&RepoName::new(name))
     }
 
     /// Record an operation in the trace.

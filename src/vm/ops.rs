@@ -252,7 +252,7 @@ impl Op {
 }
 
 fn require_repo(vm: &SyncVM, repo: &str, op: &Op) -> Result<(), PreconditionError> {
-    if vm.repos.contains_key(repo) {
+    if vm.repo(repo).is_some() {
         Ok(())
     } else {
         Err(precondition_err(op, &format!("repo '{}' not in VM state", repo)))
@@ -260,26 +260,7 @@ fn require_repo(vm: &SyncVM, repo: &str, op: &Op) -> Result<(), PreconditionErro
 }
 
 fn precondition_err(op: &Op, reason: &str) -> PreconditionError {
-    let op_name = match op {
-        Op::RefRead { .. } => "RefRead",
-        Op::RefWrite { .. } => "RefWrite",
-        Op::TreeCompare { .. } => "TreeCompare",
-        Op::AncestryCheck { .. } => "AncestryCheck",
-        Op::MergeTrees { .. } => "MergeTrees",
-        Op::Checkout { .. } => "Checkout",
-        Op::Commit { .. } => "Commit",
-        Op::BundleCreate { .. } => "BundleCreate",
-        Op::BundleFetch { .. } => "BundleFetch",
-        Op::RunContainer { .. } => "RunContainer",
-        Op::Extract { .. } => "Extract",
-        Op::Inject { .. } => "Inject",
-        Op::ForceInject { .. } => "ForceInject",
-        Op::TryMerge { .. } => "TryMerge",
-        Op::AgentRun { .. } => "AgentRun",
-        Op::InteractiveSession { .. } => "InteractiveSession",
-        Op::Confirm { .. } => "Confirm",
-    };
-    PreconditionError { op: op_name.to_string(), reason: reason.to_string() }
+    PreconditionError { op: format!("{}", op), reason: reason.to_string() }
 }
 
 // ============================================================================
@@ -363,10 +344,10 @@ impl Op {
             }
 
             Op::Inject { repo, .. } | Op::ForceInject { repo, .. } => {
-                // Container state changed — we don't know the new HEAD without re-observing.
-                // But we know the inject succeeded, so mark container as needing re-observe.
                 if let OpResult::Injected = result {
-                    // Container absorbed target's work — exact HEAD unknown until re-extract
+                    if let Some(r) = vm.repo_mut(repo) {
+                        r.container = RefState::Stale; // container changed, needs re-observation
+                    }
                 }
             }
 

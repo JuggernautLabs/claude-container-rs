@@ -5,9 +5,9 @@
 //! those require Docker and are tested separately.
 
 use std::path::Path;
-use git2::Repository;
 use super::ops::{Mount, AncestryResult, AgentTask};
 use super::backend::{VmBackend, VmBackendError};
+use super::git2_ops::{open_repo, find_commit_hash, make_signature, write_ref, compare_trees, checkout_ref, create_commit, count_between};
 
 /// A backend that operates on local git repos via git2.
 /// No Docker dependency. Suitable for testing merge/ref/tree ops.
@@ -19,44 +19,22 @@ impl Git2Backend {
 
 impl VmBackend for Git2Backend {
     async fn ref_read(&self, repo_path: &Path, ref_name: &str) -> Result<Option<String>, VmBackendError> {
-        let repo = open(repo_path)?;
-        let reference = match repo.find_reference(ref_name) {
-            Ok(r) => r,
-            Err(_) => return Ok(None),
-        };
-        let commit = reference.peel_to_commit().map_err(|e| VmBackendError::Failed(e.to_string()))?;
-        Ok(Some(commit.id().to_string()))
+        let repo = open_repo(repo_path)?;
+        find_commit_hash(&repo, ref_name)
     }
 
     async fn ref_write(&self, repo_path: &Path, ref_name: &str, hash: &str) -> Result<(), VmBackendError> {
-        let repo = open(repo_path)?;
-        let oid = git2::Oid::from_str(hash).map_err(|e| VmBackendError::Failed(e.to_string()))?;
-        repo.reference(ref_name, oid, true, "vm: ref_write")
-            .map_err(|e| VmBackendError::Failed(e.to_string()))?;
-        Ok(())
+        let repo = open_repo(repo_path)?;
+        write_ref(&repo, ref_name, hash)
     }
 
     async fn tree_compare(&self, repo_path: &Path, a: &str, b: &str) -> Result<(bool, u32), VmBackendError> {
-        let repo = open(repo_path)?;
-        let oid_a = git2::Oid::from_str(a).map_err(|e| VmBackendError::Failed(e.to_string()))?;
-        let oid_b = git2::Oid::from_str(b).map_err(|e| VmBackendError::Failed(e.to_string()))?;
-        let commit_a = repo.find_commit(oid_a).map_err(|e| VmBackendError::Failed(e.to_string()))?;
-        let commit_b = repo.find_commit(oid_b).map_err(|e| VmBackendError::Failed(e.to_string()))?;
-        let tree_a = commit_a.tree().map_err(|e| VmBackendError::Failed(e.to_string()))?;
-        let tree_b = commit_b.tree().map_err(|e| VmBackendError::Failed(e.to_string()))?;
-
-        if tree_a.id() == tree_b.id() {
-            Ok((true, 0))
-        } else {
-            let diff = repo.diff_tree_to_tree(Some(&tree_a), Some(&tree_b), None)
-                .map_err(|e| VmBackendError::Failed(e.to_string()))?;
-            let stats = diff.stats().map_err(|e| VmBackendError::Failed(e.to_string()))?;
-            Ok((false, stats.files_changed() as u32))
-        }
+        let repo = open_repo(repo_path)?;
+        compare_trees(&repo, a, b)
     }
 
     async fn ancestry_check(&self, repo_path: &Path, a: &str, b: &str) -> Result<AncestryResult, VmBackendError> {
-        let repo = open(repo_path)?;
+        let repo = open_repo(repo_path)?;
         let oid_a = git2::Oid::from_str(a).map_err(|e| VmBackendError::Failed(e.to_string()))?;
         let oid_b = git2::Oid::from_str(b).map_err(|e| VmBackendError::Failed(e.to_string()))?;
 
@@ -90,7 +68,7 @@ impl VmBackend for Git2Backend {
     }
 
     async fn merge_trees(&self, repo_path: &Path, ours: &str, theirs: &str) -> Result<(bool, Option<String>, Vec<String>), VmBackendError> {
-        let repo = open(repo_path)?;
+        let repo = open_repo(repo_path)?;
         let oid_ours = git2::Oid::from_str(ours).map_err(|e| VmBackendError::Failed(e.to_string()))?;
         let oid_theirs = git2::Oid::from_str(theirs).map_err(|e| VmBackendError::Failed(e.to_string()))?;
 
@@ -126,34 +104,14 @@ impl VmBackend for Git2Backend {
     }
 
     async fn checkout(&self, repo_path: &Path, ref_name: &str) -> Result<(), VmBackendError> {
-        let repo = open(repo_path)?;
-        repo.set_head(ref_name).map_err(|e| VmBackendError::Failed(e.to_string()))?;
-        repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
-            .map_err(|e| VmBackendError::Failed(e.to_string()))?;
-        Ok(())
+        let repo = open_repo(repo_path)?;
+        checkout_ref(&repo, ref_name)
     }
 
     async fn commit(&self, repo_path: &Path, tree: &str, parents: &[String], message: &str) -> Result<String, VmBackendError> {
-        let repo = open(repo_path)?;
-        let tree_oid = git2::Oid::from_str(tree).map_err(|e| VmBackendError::Failed(e.to_string()))?;
-        let tree_obj = repo.find_tree(tree_oid).map_err(|e| VmBackendError::Failed(e.to_string()))?;
-
-        let parent_commits: Vec<git2::Commit> = parents.iter()
-            .map(|p| {
-                let oid = git2::Oid::from_str(p).map_err(|e| VmBackendError::Failed(e.to_string()))?;
-                repo.find_commit(oid).map_err(|e| VmBackendError::Failed(e.to_string()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let parent_refs: Vec<&git2::Commit> = parent_commits.iter().collect();
-
-        let sig = repo.signature().unwrap_or_else(|_| {
-            git2::Signature::now("vm", "vm@test.com").unwrap()
-        });
-
-        let oid = repo.commit(Some("HEAD"), &sig, &sig, message, &tree_obj, &parent_refs)
-            .map_err(|e| VmBackendError::Failed(e.to_string()))?;
-
-        Ok(oid.to_string())
+        let repo = open_repo(repo_path)?;
+        let sig = make_signature(&repo);
+        create_commit(&repo, tree, parents, message, &sig)
     }
 
     // Transport ops — require Docker, not available in Git2Backend
@@ -184,18 +142,4 @@ impl VmBackend for Git2Backend {
     async fn prompt_user(&self, _message: &str) -> Result<bool, VmBackendError> {
         Ok(true) // auto-confirm in tests
     }
-}
-
-fn open(path: &Path) -> Result<Repository, VmBackendError> {
-    Repository::open(path).map_err(|e| VmBackendError::Failed(format!("open {}: {}", path.display(), e)))
-}
-
-fn count_between(repo: &Repository, from: git2::Oid, to: git2::Oid) -> u32 {
-    let mut revwalk = match repo.revwalk() {
-        Ok(r) => r,
-        Err(_) => return 0,
-    };
-    let _ = revwalk.push(to);
-    let _ = revwalk.hide(from);
-    revwalk.count() as u32
 }

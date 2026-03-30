@@ -5,92 +5,11 @@
 //! on the actual git state afterward. These test what the user sees,
 //! not internal types.
 
+mod common;
+use common::*;
 use git_sandbox::vm::*;
 use git2::Repository;
-use std::path::Path;
 use std::path::PathBuf;
-
-// ============================================================================
-// Helpers — real temp repos, auto-cleaned
-// ============================================================================
-
-fn make_repo(name: &str) -> (tempfile::TempDir, PathBuf) {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let path = tmp.path().join(name);
-    std::fs::create_dir_all(&path).unwrap();
-    let repo = Repository::init(&path).unwrap();
-    let sig = git2::Signature::now("test", "test@test.com").unwrap();
-    std::fs::write(path.join("README.md"), "# test\n").unwrap();
-    let mut index = repo.index().unwrap();
-    index.add_path(Path::new("README.md")).unwrap();
-    index.write().unwrap();
-    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
-    repo.commit(Some("refs/heads/main"), &sig, &sig, "initial", &tree, &[]).unwrap();
-    repo.set_head("refs/heads/main").unwrap();
-    repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force())).unwrap();
-    (tmp, path)
-}
-
-fn commit_file(path: &Path, file: &str, content: &str, msg: &str) -> String {
-    let repo = Repository::open(path).unwrap();
-    let sig = git2::Signature::now("test", "test@test.com").unwrap();
-    if let Some(parent) = Path::new(file).parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(path.join(parent)).unwrap();
-        }
-    }
-    std::fs::write(path.join(file), content).unwrap();
-    let mut index = repo.index().unwrap();
-    index.add_path(Path::new(file)).unwrap();
-    index.write().unwrap();
-    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
-    let parent = repo.head().unwrap().peel_to_commit().unwrap();
-    repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &[&parent]).unwrap().to_string()
-}
-
-fn git_branch(path: &Path, name: &str) {
-    let repo = Repository::open(path).unwrap();
-    let head = repo.head().unwrap().peel_to_commit().unwrap();
-    repo.branch(name, &head, false).unwrap();
-}
-
-fn git_switch(path: &Path, name: &str) {
-    let repo = Repository::open(path).unwrap();
-    repo.set_head(&format!("refs/heads/{}", name)).unwrap();
-    repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force())).unwrap();
-}
-
-fn head_of(path: &Path, name: &str) -> String {
-    let repo = Repository::open(path).unwrap();
-    let reference = repo.find_reference(&format!("refs/heads/{}", name)).unwrap();
-    let commit = reference.peel_to_commit().unwrap();
-    commit.id().to_string()
-}
-
-fn assert_no_markers(path: &Path, branch: &str) {
-    let repo = Repository::open(path).unwrap();
-    let reference = repo.find_reference(&format!("refs/heads/{}", branch)).unwrap();
-    let commit = reference.peel_to_commit().unwrap();
-    let tree = commit.tree().unwrap();
-    tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
-        if let Some(git2::ObjectType::Blob) = entry.kind() {
-            let blob = repo.find_blob(entry.id()).unwrap();
-            let content = std::str::from_utf8(blob.content()).unwrap_or("");
-            let full = if dir.is_empty() { entry.name().unwrap_or("?").to_string() }
-                       else { format!("{}{}", dir, entry.name().unwrap_or("?")) };
-            assert!(!content.contains("<<<<<<<"), "markers in {} on {}", full, branch);
-        }
-        git2::TreeWalkResult::Ok
-    }).unwrap();
-}
-
-fn assert_worktree_clean(path: &Path) {
-    let repo = Repository::open(path).unwrap();
-    let statuses = repo.statuses(Some(
-        git2::StatusOptions::new().include_untracked(false).include_ignored(false)
-    )).unwrap();
-    assert!(statuses.is_empty(), "worktree dirty: {} entries", statuses.len());
-}
 
 // ============================================================================
 // Scenario: user commits to main while merge is being planned

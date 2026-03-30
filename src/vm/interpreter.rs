@@ -67,7 +67,7 @@ impl SyncVM {
         if let Err(e) = op.check_preconditions(self) {
             let reason = e.reason.clone();
             result.outcomes.push(StepOutcome {
-                op_description: op_name(op),
+                op_description: format!("{}", op),
                 result: StepResult::PreconditionFailed(reason.clone()),
             });
             result.halted = true;
@@ -201,18 +201,18 @@ impl SyncVM {
                         primitive.apply_postconditions(self, &op_result);
                         self.record(primitive.clone(), OpOutcome::Ok);
                         result.outcomes.push(StepOutcome {
-                            op_description: op_name(primitive),
+                            op_description: format!("{}", primitive),
                             result: StepResult::Ok(op_result),
                         });
                     }
                     Err(e) => {
                         self.record(primitive.clone(), OpOutcome::Failed(e.to_string()));
                         result.outcomes.push(StepOutcome {
-                            op_description: op_name(primitive),
+                            op_description: format!("{}", primitive),
                             result: StepResult::BackendError(e.to_string()),
                         });
                         result.halted = true;
-                        result.halt_reason = Some(format!("{}: {}", op_name(primitive), e));
+                        result.halt_reason = Some(format!("{}: {}", format!("{}", primitive), e));
                     }
                 }
             }
@@ -301,6 +301,3 @@ fn repo_path(vm: &SyncVM, repo: &str) -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from(format!("/unknown/{}", repo)))
 }
 
-fn op_name(op: &Op) -> String {
-    format!("{}", op)
-}
