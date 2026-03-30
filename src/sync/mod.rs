@@ -1409,6 +1409,93 @@ git remote remove _cc_upstream 2>/dev/null
 
 
     // ========================================================================
+    // Force inject: hard-reset container to match host branch
+    // ========================================================================
+
+    /// Force-inject: discard container changes and reset to match the host branch.
+    /// Runs `git fetch + git reset --hard + git clean -fd` in the container.
+    pub async fn force_inject(
+        &self,
+        session: &SessionName,
+        repo_name: &str,
+        host_path: &Path,
+        branch: &str,
+    ) -> Result<(), ContainerError> {
+        let volume_name = session.session_volume();
+        let container_name = format!("cc-force-inject-{}-{}", session, rand_suffix());
+        let _ = self.docker.remove_container(
+            &container_name,
+            Some(RemoveContainerOptions { force: true, ..Default::default() }),
+        ).await;
+
+        let host_path_str = host_path.to_string_lossy().to_string();
+
+        let script = format!(
+            r#"
+git config --global --add safe.directory "*"
+cd "/session/{repo_name}" || exit 1
+git merge --abort 2>/dev/null || true
+git remote remove _cc_upstream 2>/dev/null || true
+git remote add _cc_upstream "/upstream" 2>/dev/null || git remote set-url _cc_upstream "/upstream"
+git fetch _cc_upstream "{branch}" || exit 1
+git reset --hard "_cc_upstream/{branch}" || exit 1
+git clean -fd 2>/dev/null || true
+git remote remove _cc_upstream 2>/dev/null
+"#,
+            repo_name = repo_name,
+            branch = branch,
+        );
+
+        use crate::types::docker::{throwaway_config, VolumeMount, RunAs};
+        let config = throwaway_config(
+            GIT_UTIL_IMAGE,
+            &script,
+            &[
+                VolumeMount::Writable { source: volume_name.to_string(), target: "/session".into() },
+                VolumeMount::ReadOnly { source: host_path_str, target: "/upstream".into() },
+            ],
+            &RunAs::developer(),
+            session,
+        );
+
+        let opts = CreateContainerOptions {
+            name: container_name.as_str(),
+            platform: None,
+        };
+
+        self.docker.create_container(Some(opts), config).await?;
+        self.docker.start_container(
+            &container_name,
+            None::<StartContainerOptions<String>>,
+        ).await?;
+
+        let exit_code = match wait_for_container(&self.docker, &container_name).await {
+            Ok(code) => code,
+            Err(e) => {
+                let _ = self.docker.remove_container(
+                    &container_name,
+                    Some(RemoveContainerOptions { force: true, ..Default::default() }),
+                ).await;
+                return Err(ContainerError::Docker(e));
+            }
+        };
+
+        let _ = self.docker.remove_container(
+            &container_name,
+            Some(RemoveContainerOptions { force: true, ..Default::default() }),
+        ).await;
+
+        if exit_code != 0 {
+            return Err(ContainerError::InjectionFailed {
+                repo: repo_name.to_string(),
+                reason: format!("force-inject exited with code {}", exit_code),
+            });
+        }
+
+        Ok(())
+    }
+
+    // ========================================================================
     // Merge-into: host branch → container repo (with conflict preservation)
     // ========================================================================
 
