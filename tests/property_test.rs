@@ -331,8 +331,7 @@ proptest! {
         // Use SyncBackend to merge
         let docker = bollard::Docker::connect_with_local_defaults().unwrap();
         let engine = git_sandbox::sync::SyncEngine::new(docker);
-        let backend: Box<dyn git_sandbox::backend::SyncBackend> = Box::new(engine);
-        let _ = backend.merge(&path, "session", "main", true);
+        let _ = engine.merge(&path, "session", "main", true);
 
         // THE PROPERTY: no conflict markers on main, ever
         let repo = git2::Repository::open(&path).unwrap();

@@ -7,8 +7,6 @@ pub mod container;
 pub mod scripts;
 pub mod shell_safety;
 pub mod watch;
-pub mod backend;
-mod backend_impl;
 pub mod vm;
 
 use bollard::Docker;

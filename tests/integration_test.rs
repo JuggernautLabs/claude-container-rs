@@ -537,18 +537,8 @@ async fn test_classify_repo() {
             hp
         );
 
-        // sync_decision should return a valid variant (not panic)
-        let decision = pair.sync_decision();
-        match &decision {
-            git_sandbox::types::SyncDecision::Skip { .. }
-            | git_sandbox::types::SyncDecision::Pull { .. }
-            | git_sandbox::types::SyncDecision::Push { .. }
-            | git_sandbox::types::SyncDecision::Reconcile { .. }
-            | git_sandbox::types::SyncDecision::MergeToTarget { .. }
-            | git_sandbox::types::SyncDecision::CloneToHost
-            | git_sandbox::types::SyncDecision::PushToContainer
-            | git_sandbox::types::SyncDecision::Blocked { .. } => {}
-        }
+        // repo_state should return a valid state (not panic)
+        let _state = pair.repo_state();
 
         classified_any = true;
         break; // one is enough for the test

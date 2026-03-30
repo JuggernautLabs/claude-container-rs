@@ -1,7 +1,7 @@
 //! Render and display tests — GS-12 UX polish.
 //!
 //! Tests for human-readable MergeOutcome Display, MergeBlocker Display,
-//! SkipReason/BlockReason Display, and relative path edge cases.
+//! and relative path edge cases.
 
 // We test the Display impls by importing the types from the crate
 use git_sandbox::types::git::{MergeOutcome, MergeBlocker};

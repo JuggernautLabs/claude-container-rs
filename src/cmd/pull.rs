@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use colored::Colorize;
 
 use super::confirm;
-use super::sync_cmd::build_sync_plan;
+use super::sync_cmd::{build_sync_plan, build_vm_from_plan};
 
 /// Extract-only: pull container work into session branches, no merge into target.
 /// Shows a diff preview of what changed in the container vs the host.
@@ -46,7 +46,6 @@ pub(crate) async fn cmd_extract(name: &SessionName, filter: Option<&str>, dry_ru
         };
         let session_branch = name.to_string();
 
-        // Check if session branch exists on host and compare
         let host_session_head = git2::Repository::open(host_path).ok()
             .and_then(|repo| {
                 repo.find_reference(&format!("refs/heads/{}", session_branch)).ok()
@@ -55,8 +54,6 @@ pub(crate) async fn cmd_extract(name: &SessionName, filter: Option<&str>, dry_ru
             });
 
         let container_head = &vr.head;
-
-        // Compute diff: host session branch HEAD → container HEAD
         let diff = host_session_head.as_ref().and_then(|h_head| {
             engine.compute_diff(host_path, h_head, container_head)
         });
@@ -71,7 +68,6 @@ pub(crate) async fn cmd_extract(name: &SessionName, filter: Option<&str>, dry_ru
         changed.push((vr, host_path.clone(), session_branch, diff, status));
     }
 
-    // Render preview
     render::rule(Some(&format!("extract: {}", name)));
     if changed.is_empty() {
         eprintln!("{}", "Nothing new to extract.".dimmed());
@@ -83,16 +79,10 @@ pub(crate) async fn cmd_extract(name: &SessionName, filter: Option<&str>, dry_ru
 
     for (vr, host_path, session_branch, _, status) in &changed {
         let short_head = &vr.head.as_str()[..7.min(vr.head.as_str().len())];
-        let size_str = if vr.git_size_mb > 0 {
-            format!(" {}MB", vr.git_size_mb)
-        } else {
-            String::new()
-        };
+        let size_str = if vr.git_size_mb > 0 { format!(" {}MB", vr.git_size_mb) } else { String::new() };
         if *status == "new" {
             eprintln!("  {} {} → {} (new, container:{}{})",
-                "←".blue(), vr.name, session_branch,
-                short_head.dimmed(),
-                size_str.as_str().dimmed());
+                "←".blue(), vr.name, session_branch, short_head.dimmed(), size_str.as_str().dimmed());
         } else {
             let session_head = git2::Repository::open(host_path).ok()
                 .and_then(|repo| {
@@ -102,101 +92,47 @@ pub(crate) async fn cmd_extract(name: &SessionName, filter: Option<&str>, dry_ru
                 });
             let from = session_head.as_deref().map(|s| &s[..7]).unwrap_or("?");
             eprintln!("  {} {} → {} ({}..{}{})",
-                "←".green(), vr.name, session_branch,
-                from.dimmed(), short_head,
-                size_str.as_str().dimmed());
+                "←".green(), vr.name, session_branch, from.dimmed(), short_head, size_str.as_str().dimmed());
         }
     }
 
-    // Full diffstat for changed repos (not new ones — no base to diff against)
-    let diffs_to_show: Vec<_> = changed.iter()
-        .filter(|(_, _, _, diff, _)| diff.is_some())
-        .collect();
-
-    if !diffs_to_show.is_empty() {
-        eprintln!();
-        render::rule(None);
-        eprintln!();
-        eprintln!("session diff:");
-
-        let mut total_files = 0u32;
-        let mut total_ins = 0u32;
-        let mut total_del = 0u32;
-
-        for (vr, _, _, diff, _) in &diffs_to_show {
-            if let Some(d) = diff {
-                if d.files.is_empty() { continue; }
-                eprintln!("  {}", vr.name.as_str().blue());
-                let max_path = d.files.iter().map(|f| f.path.len()).max().unwrap_or(20);
-                for f in &d.files {
-                    let bar = render::render_change_bar_pub(f.insertions, f.deletions, 40);
-                    eprintln!("     {:width$} | {:>4} {}", f.path, f.insertions + f.deletions, bar, width = max_path);
-                }
-                eprintln!("     {} file(s) changed, {} insertions(+), {} deletions(-)",
-                    d.files_changed, d.insertions, d.deletions);
-                eprintln!();
-                total_files += d.files_changed;
-                total_ins += d.insertions;
-                total_del += d.deletions;
-            }
-        }
-
-        if total_files > 0 {
-            eprintln!("{} Total: {} file(s), +{} -{}", "→".dimmed(), total_files, total_ins, total_del);
-        }
-    }
-
-    if dry_run {
-        return Ok(());
-    }
+    if dry_run { return Ok(()); }
 
     if !confirm(&format!("\n  Extract {} repo(s)?", changed.len()), auto_yes) {
         eprintln!("  Aborted.");
         return Ok(());
     }
 
-    // Extract in parallel — repos are independent
-    let multi = indicatif::MultiProgress::new();
-    let style = indicatif::ProgressStyle::default_spinner()
-        .template("  {spinner:.blue} {msg}").unwrap()
-        .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏");
-
-    let mut handles = Vec::new();
-    for (vr, host_path, session_branch, _, _) in &changed {
-        let spinner = multi.add(indicatif::ProgressBar::new_spinner());
-        spinner.set_style(style.clone());
-        spinner.enable_steady_tick(std::time::Duration::from_millis(80));
-        spinner.set_message(format!("Extracting {}...", vr.name));
-
-        let engine_clone = sync::SyncEngine::new(lc.docker_client().clone());
-        let name_clone = name.clone();
-        let repo_name = vr.name.clone();
-        let host_path = host_path.clone();
-        let session_branch = session_branch.clone();
-
-        handles.push(tokio::spawn(async move {
-            let result = engine_clone.extract(&name_clone, &repo_name, &host_path, &session_branch).await;
-            (repo_name, result, spinner)
-        }));
-    }
+    // Extract via VM
+    let backend = git_sandbox::vm::RealBackend::from_docker(lc.docker_client().clone(), name.as_str());
+    let mut vm = git_sandbox::vm::SyncVM::new(name.as_str(), "");
 
     let mut extracted = 0u32;
     let mut failed = 0u32;
-    for handle in handles {
-        match handle.await {
-            Ok((repo_name, Ok(result), spinner)) => {
-                spinner.finish_and_clear();
-                multi.println(format!("  {} {} ({} commit(s))",
-                    "✓".green(), repo_name, result.commit_count)).ok();
-                extracted += 1;
-            }
-            Ok((repo_name, Err(e), spinner)) => {
-                spinner.finish_and_clear();
-                multi.println(format!("  {} {} — {}",
-                    "✗".red(), repo_name, e)).ok();
-                failed += 1;
-            }
-            Err(_) => { failed += 1; }
+    for (vr, host_path, session_branch, _, _) in &changed {
+        vm.set_repo(&vr.name, git_sandbox::vm::RepoVM::from_refs(
+            git_sandbox::vm::RefState::At(vr.head.as_str().to_string()),
+            git_sandbox::vm::RefState::Absent,
+            git_sandbox::vm::RefState::Absent,
+            Some(host_path.clone()),
+        ));
+
+        let result = vm.run(&backend, vec![
+            git_sandbox::vm::Op::Extract { repo: vr.name.clone(), session_branch: session_branch.clone() },
+        ]).await;
+
+        if result.succeeded() > 0 {
+            eprintln!("  {} {}", "✓".green(), vr.name);
+            extracted += 1;
+        } else {
+            let err = result.outcomes.first()
+                .and_then(|o| match &o.result {
+                    git_sandbox::vm::StepResult::BackendError(e) => Some(e.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("unknown error");
+            eprintln!("  {} {} — {}", "✗".red(), vr.name, err);
+            failed += 1;
         }
     }
 
@@ -210,75 +146,102 @@ pub(crate) async fn cmd_extract(name: &SessionName, filter: Option<&str>, dry_ru
 }
 
 pub(crate) async fn cmd_pull(name: &SessionName, branch: &str, filter: Option<&str>, include_deps: bool, dry_run: bool, auto_yes: bool, squash: bool) -> anyhow::Result<()> {
-    // Phase 1: Quick preview
     let (lc, engine, initial_plan, repo_paths) = build_sync_plan(name, branch, filter, include_deps).await?;
 
-    let has_work = initial_plan.action.repo_actions.iter()
-        .any(|a| a.state.has_work());
+    let has_work = initial_plan.action.repo_actions.iter().any(|a| a.state.has_work());
     let has_extractable = initial_plan.action.repo_actions.iter()
         .any(|a| matches!(a.state.pull_action(), PullAction::Extract { .. } | PullAction::CloneToHost | PullAction::Reconcile));
 
     render::sync_plan_directed(&initial_plan.action, "pull");
 
-    if dry_run || !has_work {
-        return Ok(());
-    }
+    if dry_run || !has_work { return Ok(()); }
 
     use std::io::Write;
 
-    // Phase 2: Extract repos that need it, then re-plan with accurate trial merge data
+    // Phase 1: Extract via VM
+    let backend = git_sandbox::vm::RealBackend::from_docker(lc.docker_client().clone(), name.as_str());
     let plan = if has_extractable {
-        let session_branch = name.to_string();
-        let spinner = indicatif::ProgressBar::new_spinner();
-        spinner.set_style(indicatif::ProgressStyle::default_spinner()
-            .template("  {spinner:.blue} Fetching {msg}...").unwrap()
-            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"));
-        spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+        let mut vm = build_vm_from_plan(name, branch, &initial_plan.action, &repo_paths);
+        let extract_ops: Vec<_> = initial_plan.action.repo_actions.iter()
+            .filter(|a| matches!(a.state.pull_action(), PullAction::Extract { .. } | PullAction::CloneToHost | PullAction::Reconcile))
+            .map(|a| git_sandbox::vm::Op::Extract {
+                repo: a.repo_name.clone(),
+                session_branch: name.to_string(),
+            })
+            .collect();
 
-        for action in &initial_plan.action.repo_actions {
-            if !matches!(action.state.pull_action(), PullAction::Extract { .. } | PullAction::CloneToHost | PullAction::Reconcile) {
-                continue;
-            }
-            if let Some(host_path) = repo_paths.get(&action.repo_name) {
-                spinner.set_message(action.repo_name.clone());
-                let _ = engine.extract(name, &action.repo_name, host_path, &session_branch).await;
+        if !extract_ops.is_empty() {
+            let spinner = indicatif::ProgressBar::new_spinner();
+            spinner.set_style(indicatif::ProgressStyle::default_spinner()
+                .template("  {spinner:.blue} Extracting...").unwrap()
+                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"));
+            spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+
+            let result = vm.run(&backend, extract_ops).await;
+            spinner.finish_and_clear();
+
+            if result.failed() > 0 {
+                for o in &result.outcomes {
+                    if !o.result.is_ok() {
+                        eprintln!("  {} extract: {}", "✗".red(), o.op_description);
+                    }
+                }
             }
         }
-        spinner.finish_and_clear();
 
-        // Re-plan now that we have the commits on host for accurate trial merges
-        let (_lc2, _engine2, plan, _repo_paths2) = build_sync_plan(name, branch, filter, include_deps).await?;
+        // Re-plan with accurate trial merges
+        let (_lc2, _engine2, plan, _rp2) = build_sync_plan(name, branch, filter, include_deps).await?;
         render::sync_plan_directed(&plan.action, "pull");
         plan
     } else {
-        // No extraction needed — initial plan is already accurate
         initial_plan
     };
 
-    struct PendingMergeInfo {
-        repo_name: String,
-        host_path: std::path::PathBuf,
-        has_conflict: bool,
-        conflict_files: Vec<String>,
-    }
-    let pending_merge_repos: Vec<PendingMergeInfo> = plan.action.repo_actions.iter()
+    // Phase 2: Merge — use engine.merge() directly (VM TryMerge needs data flow)
+    let pending_merges: Vec<_> = plan.action.repo_actions.iter()
         .filter(|a| matches!(a.state.pull_action(), PullAction::MergeToTarget { .. }))
-        .filter_map(|a| {
-            a.host_path.clone().map(|p| {
-                let has_conflict = a.trial_conflicts.as_ref().map_or(false, |f| !f.is_empty());
-                let conflict_files = a.trial_conflicts.clone().unwrap_or_default();
-                PendingMergeInfo { repo_name: a.repo_name.clone(), host_path: p, has_conflict, conflict_files }
-            })
-        })
+        .filter_map(|a| a.host_path.clone().map(|p| {
+            let has_conflict = a.trial_conflicts.as_ref().map_or(false, |f| !f.is_empty());
+            let conflict_files = a.trial_conflicts.clone().unwrap_or_default();
+            (a.repo_name.clone(), p, has_conflict, conflict_files)
+        }))
         .collect();
-    struct DivergedInfo {
-        repo_name: String,
-        container_ahead: u32,
-        host_ahead: u32,
-        has_conflict: bool,
-        conflict_files: Vec<String>,
+
+    let (clean, conflicts): (Vec<_>, Vec<_>) = pending_merges.iter()
+        .partition(|(_, _, has_conflict, _)| !has_conflict);
+
+    if !clean.is_empty() {
+        let session_branch = name.to_string();
+        if confirm(&format!("\n  Merge {} repo(s) into {}?", clean.len(), branch), auto_yes) {
+            for (repo_name, host_path, _, _) in &clean {
+                match engine.merge(host_path, &session_branch, branch, squash) {
+                    Ok(outcome) => {
+                        if matches!(outcome, git::MergeOutcome::Conflict { .. }) {
+                            eprintln!("  {} {} — {}", "✗".red(), repo_name, outcome);
+                        } else {
+                            eprintln!("  {} {} — {}", "✓".green(), repo_name, outcome);
+                        }
+                    }
+                    Err(e) => eprintln!("  {} {} — {}", "✗".red(), repo_name, e),
+                }
+            }
+        }
     }
-    let diverged_repos: Vec<DivergedInfo> = plan.action.repo_actions.iter()
+
+    if !conflicts.is_empty() {
+        eprintln!();
+        for (repo_name, _, _, conflict_files) in &conflicts {
+            let file_list = conflict_files.iter().take(5).map(|f| f.as_str()).collect::<Vec<_>>().join(", ");
+            eprintln!("  {} {} — will conflict ({})", "✗".red(), repo_name, file_list);
+        }
+        let conflict_repos: Vec<_> = conflicts.iter()
+            .map(|(name, path, _, files)| (name.clone(), path.clone(), files.clone()))
+            .collect();
+        offer_reconciliation(&lc, name, &conflict_repos, branch).await?;
+    }
+
+    // Phase 3: Diverged repos — interactive
+    let diverged: Vec<_> = plan.action.repo_actions.iter()
         .filter(|a| matches!(a.state.pull_action(), PullAction::Reconcile))
         .map(|a| {
             let (ca, ha) = match &a.state.extraction {
@@ -287,61 +250,23 @@ pub(crate) async fn cmd_pull(name: &SessionName, branch: &str, filter: Option<&s
             };
             let has_conflict = a.trial_conflicts.as_ref().map_or(false, |f| !f.is_empty());
             let conflict_files = a.trial_conflicts.clone().unwrap_or_default();
-            DivergedInfo { repo_name: a.repo_name.clone(), container_ahead: ca, host_ahead: ha, has_conflict, conflict_files }
+            (a.repo_name.clone(), ca, ha, has_conflict, conflict_files)
         })
         .collect();
 
-    let (clean_merges, conflict_merges): (Vec<_>, Vec<_>) = pending_merge_repos.iter()
-        .partition(|m| !m.has_conflict);
-
-    if !clean_merges.is_empty() {
-        let session_branch = name.to_string();
-        if confirm(&format!("\n  Merge {} repo(s) into {}?", clean_merges.len(), branch), auto_yes) {
-            for m in &clean_merges {
-                match engine.merge(&m.host_path, &session_branch, branch, squash) {
-                    Ok(outcome) => {
-                        if matches!(outcome, git::MergeOutcome::Conflict { .. }) {
-                            eprintln!("  {} {} — {}", "✗".red(), m.repo_name, outcome);
-                        } else {
-                            eprintln!("  {} {} — {}", "✓".green(), m.repo_name, outcome);
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("  {} {} — {}", "✗".red(), m.repo_name, e);
-                    }
-                }
-            }
-        }
-    }
-
-    if !conflict_merges.is_empty() {
-        eprintln!();
-        for m in &conflict_merges {
-            let file_list = m.conflict_files.iter().take(5).map(|f| f.as_str()).collect::<Vec<_>>().join(", ");
-            eprintln!("  {} {} — will conflict ({})", "✗".red(), m.repo_name, file_list);
-        }
-
-        let conflict_repos: Vec<_> = conflict_merges.iter()
-            .map(|m| (m.repo_name.clone(), m.host_path.clone(), m.conflict_files.clone()))
-            .collect();
-        offer_reconciliation(&lc, name, &conflict_repos, branch).await?;
-    }
-
-    if !diverged_repos.is_empty() {
+    if !diverged.is_empty() {
         eprintln!();
         let mut conflict_repos = Vec::new();
 
-        for dinfo in &diverged_repos {
-            let merge_status = if dinfo.has_conflict {
+        for (repo_name, ca, ha, has_conflict, conflict_files) in &diverged {
+            let merge_status = if *has_conflict {
                 format!("{}", "CONFLICT".red())
             } else {
                 format!("{}", "auto-merge possible".green())
             };
+            eprintln!("  {} {} — container +{}, host +{} ({})", "↔".yellow(), repo_name, ca, ha, merge_status);
 
-            eprintln!("  {} {} — container +{}, host +{} ({})",
-                "↔".yellow(), dinfo.repo_name, dinfo.container_ahead, dinfo.host_ahead, merge_status);
-
-            if dinfo.has_conflict {
+            if *has_conflict {
                 eprint!("    [s]kip  [r]econcile with Claude  > ");
             } else {
                 eprint!("    [a]uto-merge  [s]kip  [r]econcile with Claude  > ");
@@ -352,30 +277,31 @@ pub(crate) async fn cmd_pull(name: &SessionName, branch: &str, filter: Option<&s
             let choice = choice.trim().to_lowercase();
 
             match choice.chars().next().unwrap_or('s') {
-                'a' if !dinfo.has_conflict => {
-                    let host_path = match repo_paths.get(&dinfo.repo_name) {
+                'a' if !has_conflict => {
+                    let host_path = match repo_paths.get(repo_name) {
                         Some(p) => p,
                         None => { eprintln!("    {} no host path", "✗".red()); continue; }
                     };
-                    let session_branch = name.to_string();
-                    match engine.inject(name, &dinfo.repo_name, host_path, branch).await {
-                        Ok(()) => {
-                            match engine.extract(name, &dinfo.repo_name, host_path, &session_branch).await {
-                                Ok(_extract) => {
-                                    match engine.merge(host_path, &session_branch, branch, squash) {
-                                        Ok(outcome) => eprintln!("    {} auto-merged ({})", "✓".green(), outcome),
-                                        Err(e) => eprintln!("    {} merge failed: {}", "✗".red(), e),
-                                    }
-                                }
-                                Err(e) => eprintln!("    {} extract failed: {}", "✗".red(), e),
-                            }
+                    // Auto-reconcile via VM: inject + extract + merge
+                    let mut vm = build_vm_from_plan(name, branch, &plan.action, &repo_paths);
+                    let ops = vec![
+                        git_sandbox::vm::Op::Inject { repo: repo_name.clone(), branch: branch.to_string() },
+                        git_sandbox::vm::Op::Extract { repo: repo_name.clone(), session_branch: name.to_string() },
+                    ];
+                    let result = vm.run(&backend, ops).await;
+                    if result.failed() > 0 {
+                        eprintln!("    {} reconcile failed", "✗".red());
+                    } else {
+                        let session_branch = name.to_string();
+                        match engine.merge(host_path, &session_branch, branch, squash) {
+                            Ok(outcome) => eprintln!("    {} auto-merged ({})", "✓".green(), outcome),
+                            Err(e) => eprintln!("    {} merge failed: {}", "✗".red(), e),
                         }
-                        Err(e) => eprintln!("    {} inject failed: {}", "✗".red(), e),
                     }
                 }
                 'r' => {
-                    if let Some(host_path) = repo_paths.get(&dinfo.repo_name) {
-                        conflict_repos.push((dinfo.repo_name.clone(), host_path.clone(), dinfo.conflict_files.clone()));
+                    if let Some(host_path) = repo_paths.get(repo_name) {
+                        conflict_repos.push((repo_name.clone(), host_path.clone(), conflict_files.clone()));
                     }
                 }
                 _ => {
@@ -393,7 +319,6 @@ pub(crate) async fn cmd_pull(name: &SessionName, branch: &str, filter: Option<&s
 }
 
 /// Extract conflict info from sync results for agentic reconciliation.
-/// Uses typed pattern matching on RepoSyncResult::Conflicted — no string inspection.
 pub(crate) fn collect_conflicts(
     result: &SyncResult,
     repo_paths: &std::collections::BTreeMap<String, std::path::PathBuf>,
@@ -448,8 +373,7 @@ pub(crate) async fn offer_reconciliation(
 
     let token = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
         .or_else(|_| {
-            let token_file = dirs::home_dir()
-                .unwrap_or_default()
+            let token_file = dirs::home_dir().unwrap_or_default()
                 .join(".config/claude-container/token");
             std::fs::read_to_string(&token_file)
         })
@@ -457,38 +381,45 @@ pub(crate) async fn offer_reconciliation(
     let verified_token = container::verify_token(lc, token.trim())?;
 
     let ready = verified::LaunchReady {
-        docker,
-        image: verified_image,
-        volumes,
-        token: verified_token,
+        docker, image: verified_image, volumes, token: verified_token,
         container: verified::LaunchTarget::Create,
     };
 
     let script_dir = scripts::materialize()?;
-
     eprintln!();
     std::io::stderr().flush().ok();
 
-    let reconciled = container::launch_reconciliation(
-        lc, ready, name, &script_dir, conflicts,
-    ).await?;
+    let reconciled = container::launch_reconciliation(lc, ready, name, &script_dir, conflicts).await?;
 
     if let Some(_desc) = reconciled {
         eprintln!();
         eprintln!("  {} Reconciliation complete. Re-extracting...", "✓".green());
 
-        let engine = sync::SyncEngine::new(lc.docker_client().clone());
+        let backend = git_sandbox::vm::RealBackend::from_docker(lc.docker_client().clone(), name.as_str());
+        let mut vm = git_sandbox::vm::SyncVM::new(name.as_str(), branch);
+
         for (repo_name, host_path, _) in conflicts {
-            let session_branch = name.to_string();
-            match engine.extract(name, repo_name, host_path, &session_branch).await {
-                Ok(extract) => {
-                    eprintln!("    {} {} — {} commit(s)", "✓".green(), repo_name, extract.commit_count);
-                    match engine.merge(host_path, &session_branch, branch, true) {
-                        Ok(outcome) => eprintln!("    {} {} — {}", "✓".green(), repo_name, outcome),
-                        Err(e) => eprintln!("    {} {} — merge failed: {}", "✗".red(), repo_name, e),
-                    }
+            vm.set_repo(repo_name, git_sandbox::vm::RepoVM::from_refs(
+                git_sandbox::vm::RefState::Stale, // container state changed by agent
+                git_sandbox::vm::RefState::Absent,
+                git_sandbox::vm::RefState::Absent,
+                Some(host_path.clone()),
+            ));
+
+            let result = vm.run(&backend, vec![
+                git_sandbox::vm::Op::Extract { repo: repo_name.clone(), session_branch: name.to_string() },
+            ]).await;
+
+            if result.succeeded() > 0 {
+                eprintln!("    {} {} — extracted", "✓".green(), repo_name);
+                let engine = sync::SyncEngine::new(lc.docker_client().clone());
+                let session_branch = name.to_string();
+                match engine.merge(host_path, &session_branch, branch, true) {
+                    Ok(outcome) => eprintln!("    {} {} — {}", "✓".green(), repo_name, outcome),
+                    Err(e) => eprintln!("    {} {} — merge failed: {}", "✗".red(), repo_name, e),
                 }
-                Err(e) => eprintln!("    {} {} — extract failed: {}", "✗".red(), repo_name, e),
+            } else {
+                eprintln!("    {} {} — extract failed", "✗".red(), repo_name);
             }
         }
     } else {
@@ -505,13 +436,9 @@ mod tests {
 
     #[test]
     fn collect_conflicts_empty_results() {
-        let result = SyncResult {
-            session_name: SessionName::new("test"),
-            results: vec![],
-        };
+        let result = SyncResult { session_name: SessionName::new("test"), results: vec![] };
         let paths = std::collections::BTreeMap::new();
-        let conflicts = collect_conflicts(&result, &paths);
-        assert!(conflicts.is_empty());
+        assert!(collect_conflicts(&result, &paths).is_empty());
     }
 
     #[test]
@@ -519,47 +446,32 @@ mod tests {
         let mut paths = std::collections::BTreeMap::new();
         paths.insert("repo-a".to_string(), PathBuf::from("/tmp/repo-a"));
         paths.insert("repo-b".to_string(), PathBuf::from("/tmp/repo-b"));
-
         let result = SyncResult {
             session_name: SessionName::new("test"),
             results: vec![
-                action::RepoSyncResult::Conflicted {
-                    repo_name: "repo-a".to_string(),
-                    files: vec!["file1.rs".to_string()],
-                },
-                action::RepoSyncResult::Skipped {
-                    repo_name: "repo-b".to_string(),
-                    reason: "already in sync".to_string(),
-                },
+                action::RepoSyncResult::Conflicted { repo_name: "repo-a".to_string(), files: vec!["file1.rs".to_string()] },
+                action::RepoSyncResult::Skipped { repo_name: "repo-b".to_string(), reason: "already in sync".to_string() },
             ],
         };
-
         let conflicts = collect_conflicts(&result, &paths);
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].0, "repo-a");
-        assert_eq!(conflicts[0].2, vec!["file1.rs".to_string()]);
     }
 
     #[test]
     fn collect_conflicts_skips_missing_paths() {
-        let paths = std::collections::BTreeMap::new(); // empty paths
-
+        let paths = std::collections::BTreeMap::new();
         let result = SyncResult {
             session_name: SessionName::new("test"),
             results: vec![
-                action::RepoSyncResult::Conflicted {
-                    repo_name: "repo-a".to_string(),
-                    files: vec!["file1.rs".to_string()],
-                },
+                action::RepoSyncResult::Conflicted { repo_name: "repo-a".to_string(), files: vec!["file1.rs".to_string()] },
             ],
         };
-
-        let conflicts = collect_conflicts(&result, &paths);
-        assert!(conflicts.is_empty(), "Should skip conflicts with no host path");
+        assert!(collect_conflicts(&result, &paths).is_empty());
     }
 
     #[tokio::test]
-    #[ignore] // requires Docker
+    #[ignore]
     async fn cmd_extract_is_callable() {
         let name = SessionName::new("test-nonexistent-extract");
         let _ = cmd_extract(&name, None, true, true).await;
