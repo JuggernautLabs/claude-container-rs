@@ -290,18 +290,24 @@ pub fn repo_pull_action(repo: &RepoVM) -> PullIntent {
     match (&repo.container, &repo.session, &repo.target) {
         // No container — nothing to extract
         (RefState::Absent, _, _) => PullIntent::Skip,
-        // Container has work session doesn't
-        (RefState::At(c), RefState::At(s), _) if c != s => PullIntent::Extract,
+
+        // Container-only (no session branch yet)
         (RefState::At(_), RefState::Absent, _) => PullIntent::CloneToHost,
-        // Session ahead of target
-        (RefState::At(c), RefState::At(s), RefState::At(t)) if s != t => {
-            // Check if container matches session (extraction done)
-            if c == s {
-                PullIntent::MergeToTarget
-            } else {
-                PullIntent::Extract
-            }
+
+        // Container has work AND target moved independently = RECONCILE
+        // Both sides changed: container != session AND target != session
+        (RefState::At(c), RefState::At(s), RefState::At(t)) if c != s && t != s && c != t => {
+            PullIntent::Reconcile { has_conflicts: false, conflict_files: vec![] }
         }
+
+        // Container has work, target hasn't moved (or matches session)
+        (RefState::At(c), RefState::At(s), _) if c != s => PullIntent::Extract,
+
+        // Container matches session, session ahead of target
+        (RefState::At(c), RefState::At(s), RefState::At(t)) if c == s && s != t => {
+            PullIntent::MergeToTarget
+        }
+
         _ => PullIntent::Skip,
     }
 }

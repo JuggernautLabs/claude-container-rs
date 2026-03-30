@@ -401,3 +401,89 @@ async fn merged_content_is_correct() {
     assert!(tree_has_file(&path, "main", "README.md"));
     assert_no_markers(&path, "main");
 }
+
+// ============================================================================
+// Test: Reconcile fires when BOTH container and target diverged from session
+// ============================================================================
+
+#[tokio::test]
+async fn reconcile_fires_when_both_sides_changed() {
+    // The scenario: an agent worked in the container (container ahead of session),
+    // AND someone pushed to main (target ahead of session).
+    // Both sides changed independently. This is a reconcile situation.
+
+    let mut vm = SyncVM::new("session", "main");
+    vm.set_repo("alpha", RepoVM::from_refs(
+        RefState::At("container_new_work".into()),  // agent made commits
+        RefState::At("session_old".into()),         // session not yet updated
+        RefState::At("target_external".into()),     // someone pushed to main
+        Some(PathBuf::from("/tmp/alpha")),
+    ));
+
+    let pull = programs::repo_pull_action(vm.repo("alpha").unwrap());
+    assert!(matches!(pull, programs::PullIntent::Reconcile { .. }),
+        "diverged state (container ahead + target moved) should be Reconcile, got {:?}", pull);
+}
+
+#[tokio::test]
+async fn reconcile_not_fired_when_only_container_ahead() {
+    // Container ahead but target hasn't moved — simple Extract, not Reconcile.
+    let mut vm = SyncVM::new("session", "main");
+    vm.set_repo("alpha", RepoVM::from_refs(
+        RefState::At("container_new".into()),
+        RefState::At("session_old".into()),
+        RefState::At("session_old".into()),  // target == session — no external work
+        Some(PathBuf::from("/tmp/alpha")),
+    ));
+
+    let pull = programs::repo_pull_action(vm.repo("alpha").unwrap());
+    assert!(matches!(pull, programs::PullIntent::Extract),
+        "only container ahead should be Extract, got {:?}", pull);
+}
+
+#[tokio::test]
+async fn reconcile_not_fired_when_only_target_ahead() {
+    // Container matches session, target moved — MergeToTarget, not Reconcile.
+    let mut vm = SyncVM::new("session", "main");
+    vm.set_repo("alpha", RepoVM::from_refs(
+        RefState::At("same".into()),
+        RefState::At("same".into()),
+        RefState::At("target_moved".into()),
+        Some(PathBuf::from("/tmp/alpha")),
+    ));
+
+    let pull = programs::repo_pull_action(vm.repo("alpha").unwrap());
+    assert!(matches!(pull, programs::PullIntent::MergeToTarget),
+        "only target ahead should be MergeToTarget, got {:?}", pull);
+}
+
+#[tokio::test]
+async fn reconcile_generates_inject_then_extract_then_merge() {
+    // When reconcile fires, plan_pull should generate: inject + extract + merge
+
+    let mut vm = SyncVM::new("session", "main");
+    vm.set_repo("alpha", RepoVM::from_refs(
+        RefState::At("container_new".into()),
+        RefState::At("session_old".into()),
+        RefState::At("target_external".into()),
+        Some(PathBuf::from("/tmp/alpha")),
+    ));
+
+    let ops = programs::plan_pull(&vm);
+
+    // Should have inject (push target into container first)
+    let has_inject = ops.iter().any(|op| matches!(op, Op::Inject { .. }));
+    // Should have extract (get merged result back)
+    let has_extract = ops.iter().any(|op| matches!(op, Op::Extract { .. }));
+    // Should have merge (merge into target)
+    let has_merge = ops.iter().any(|op| matches!(op, Op::TryMerge { .. }));
+
+    assert!(has_inject, "reconcile should inject target into container, got: {:?}", ops);
+    assert!(has_extract, "reconcile should extract after inject, got: {:?}", ops);
+    assert!(has_merge, "reconcile should merge into target, got: {:?}", ops);
+
+    // Inject should come before extract
+    let inject_pos = ops.iter().position(|op| matches!(op, Op::Inject { .. })).unwrap();
+    let extract_pos = ops.iter().position(|op| matches!(op, Op::Extract { .. })).unwrap();
+    assert!(inject_pos < extract_pos, "inject should come before extract in reconcile");
+}
