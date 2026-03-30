@@ -17,7 +17,10 @@ pub(crate) async fn cmd_sync_preview(name: &SessionName, branch: &str, filter: O
 pub(crate) async fn cmd_sync(name: &SessionName, branch: &str, filter: Option<&str>, include_deps: bool, dry_run: bool, auto_yes: bool) -> anyhow::Result<()> {
     let (lc, engine, plan, repo_paths) = build_sync_plan(name, branch, filter, include_deps).await?;
 
-    let has_work = plan.action.has_work();
+    // VM planning
+    let vm = build_vm_from_plan(name, branch, &plan.action, &repo_paths);
+    let sync_ops = git_sandbox::vm::programs::plan_sync(&vm);
+    let has_work = !sync_ops.is_empty();
 
     render::sync_plan_directed(&plan.action, "sync");
 
@@ -40,6 +43,28 @@ pub(crate) async fn cmd_sync(name: &SessionName, branch: &str, filter: Option<&s
     }
 
     Ok(())
+}
+
+/// Build a VM from a sync plan (shared helper).
+pub(crate) fn build_vm_from_plan(
+    name: &SessionName,
+    branch: &str,
+    plan: &SessionSyncPlan,
+    repo_paths: &std::collections::BTreeMap<String, std::path::PathBuf>,
+) -> git_sandbox::vm::SyncVM {
+    use git_sandbox::vm::{SyncVM, RepoVM, RefState};
+
+    let mut vm = SyncVM::new(name.as_str(), branch);
+    for action in &plan.repo_actions {
+        let host_path = repo_paths.get(&action.repo_name).cloned();
+        vm.set_repo(&action.repo_name, RepoVM::from_refs(
+            action.container_head.as_ref().map(|h| RefState::At(h.to_string())).unwrap_or(RefState::Absent),
+            action.session_head.as_ref().map(|h| RefState::At(h.to_string())).unwrap_or(RefState::Absent),
+            action.target_head.as_ref().map(|h| RefState::At(h.to_string())).unwrap_or(RefState::Absent),
+            host_path,
+        ));
+    }
+    vm
 }
 
 /// Shared: build a sync plan (used by pull, push, sync, status)

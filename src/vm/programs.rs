@@ -259,7 +259,7 @@ pub enum PullIntent {
 }
 
 /// Derive push intent from repo state.
-fn repo_push_action(repo: &RepoVM, target_branch: &str) -> PushIntent {
+pub fn repo_push_action(repo: &RepoVM, target_branch: &str) -> PushIntent {
     // Container-side blockers block push
     if !repo.container_clean {
         return PushIntent::Blocked("container dirty".into());
@@ -282,7 +282,7 @@ fn repo_push_action(repo: &RepoVM, target_branch: &str) -> PushIntent {
 }
 
 /// Derive pull intent from repo state.
-fn repo_pull_action(repo: &RepoVM) -> PullIntent {
+pub fn repo_pull_action(repo: &RepoVM) -> PullIntent {
     if !repo.host_clean {
         return PullIntent::Blocked("host dirty".into());
     }
