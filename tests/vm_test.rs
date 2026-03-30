@@ -847,3 +847,149 @@ fn git2_temp_repo_cleaned_up_on_drop() {
     };
     assert!(!path.exists(), "temp repo should be gone after drop");
 }
+
+// ── ref_write: write a ref and read it back ──
+
+#[test]
+fn git2_ref_write_creates_branch() {
+    let (_tmp, path) = make_repo("ref-write");
+    let backend = Git2Backend::new();
+
+    let main_h = head_of(&path, "main");
+    // Write a new branch ref pointing at main's HEAD
+    backend.ref_write(&path, "refs/heads/new-branch", &main_h).unwrap();
+
+    // Read it back
+    let read_back = backend.ref_read(&path, "refs/heads/new-branch").unwrap();
+    assert_eq!(read_back, Some(main_h));
+}
+
+#[test]
+fn git2_ref_write_updates_existing() {
+    let (_tmp, path) = make_repo("ref-update");
+    let backend = Git2Backend::new();
+
+    let old_head = head_of(&path, "main");
+    commit_file(&path, "new.txt", "content", "advance");
+    let new_head = head_of(&path, "main");
+    assert_ne!(old_head, new_head);
+
+    // Create a branch at old HEAD
+    backend.ref_write(&path, "refs/heads/marker", &old_head).unwrap();
+    assert_eq!(backend.ref_read(&path, "refs/heads/marker").unwrap(), Some(old_head.clone()));
+
+    // Update it to new HEAD
+    backend.ref_write(&path, "refs/heads/marker", &new_head).unwrap();
+    assert_eq!(backend.ref_read(&path, "refs/heads/marker").unwrap(), Some(new_head));
+}
+
+// ── tree_compare ──
+
+#[test]
+fn git2_tree_compare_identical() {
+    let (_tmp, path) = make_repo("tree-same");
+    let backend = Git2Backend::new();
+    let h = head_of(&path, "main");
+
+    let (identical, files) = backend.tree_compare(&path, &h, &h).unwrap();
+    assert!(identical);
+    assert_eq!(files, 0);
+}
+
+#[test]
+fn git2_tree_compare_different() {
+    let (_tmp, path) = make_repo("tree-diff");
+    let before = head_of(&path, "main");
+    commit_file(&path, "new.txt", "content", "add file");
+    let after = head_of(&path, "main");
+
+    let backend = Git2Backend::new();
+    let (identical, files) = backend.tree_compare(&path, &before, &after).unwrap();
+    assert!(!identical);
+    assert_eq!(files, 1);
+}
+
+// ── checkout ──
+
+#[test]
+fn git2_checkout_switches_worktree() {
+    let (_tmp, path) = make_repo("checkout");
+    commit_file(&path, "main-only.txt", "main", "main file");
+    git_branch(&path, "other");
+    git_switch(&path, "other");
+    commit_file(&path, "other-only.txt", "other", "other file");
+
+    // Worktree has other-only.txt
+    assert!(path.join("other-only.txt").exists());
+
+    let backend = Git2Backend::new();
+    backend.checkout(&path, "refs/heads/main").unwrap();
+
+    // Worktree now has main-only.txt, not other-only.txt
+    assert!(path.join("main-only.txt").exists());
+    assert!(!path.join("other-only.txt").exists());
+}
+
+// ── commit ──
+
+#[test]
+fn git2_commit_creates_new_commit() {
+    let (_tmp, path) = make_repo("commit");
+    let backend = Git2Backend::new();
+
+    // Add a file to the index and write a tree
+    std::fs::write(path.join("new.txt"), "hello").unwrap();
+    let repo = Repository::open(&path).unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(Path::new("new.txt")).unwrap();
+    index.write().unwrap();
+    let tree_oid = index.write_tree().unwrap();
+    let tree_hash = tree_oid.to_string();
+    let parent = head_of(&path, "main");
+
+    let new_hash = backend.commit(&path, &tree_hash, &[parent.clone()], "test commit").unwrap();
+    assert_ne!(new_hash, parent);
+
+    // New commit is HEAD
+    let current_head = head_of(&path, "main");
+    assert_eq!(current_head, new_hash);
+}
+
+// ── error cases ──
+
+#[test]
+fn git2_ref_read_bad_path_returns_error() {
+    let backend = Git2Backend::new();
+    let result = backend.ref_read(Path::new("/nonexistent/repo"), "refs/heads/main");
+    assert!(result.is_err());
+}
+
+#[test]
+fn git2_ref_write_bad_hash_returns_error() {
+    let (_tmp, path) = make_repo("bad-hash");
+    let backend = Git2Backend::new();
+    let result = backend.ref_write(&path, "refs/heads/test", "not-a-valid-hash");
+    assert!(result.is_err());
+}
+
+#[test]
+fn git2_merge_trees_bad_hash_returns_error() {
+    let (_tmp, path) = make_repo("bad-merge");
+    let backend = Git2Backend::new();
+    let result = backend.merge_trees(&path, "0000000000000000000000000000000000000000", "0000000000000000000000000000000000000000");
+    assert!(result.is_err());
+}
+
+// ── Docker ops return errors ──
+
+#[test]
+fn git2_docker_ops_return_errors() {
+    let backend = Git2Backend::new();
+    assert!(backend.bundle_create("session", "repo").is_err());
+    assert!(backend.bundle_fetch(Path::new("/tmp"), "/tmp/b").is_err());
+    assert!(backend.run_container("img", "script", &[]).is_err());
+    assert!(backend.agent_run(&AgentTask::Work, "", &[]).is_err());
+    assert!(backend.interactive_session(None, &[]).is_err());
+    // prompt_user auto-confirms in Git2Backend
+    assert_eq!(backend.prompt_user("test").unwrap(), true);
+}
