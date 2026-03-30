@@ -30,23 +30,23 @@ fn repo_absent() -> RepoVM {
 // Precondition tests
 // ============================================================================
 
-#[test]
-fn precondition_ref_read_requires_repo_in_vm() {
+#[tokio::test]
+async fn precondition_ref_read_requires_repo_in_vm() {
     let vm = test_vm();
     let op = Op::ref_read(Side::Host, "missing-repo", "refs/heads/main");
     assert!(op.check_preconditions(&vm).is_err());
 }
 
-#[test]
-fn precondition_ref_read_passes_when_repo_exists() {
+#[tokio::test]
+async fn precondition_ref_read_passes_when_repo_exists() {
     let mut vm = test_vm();
     vm.set_repo("alpha", repo_with_refs("aaa", "bbb", "ccc"));
     let op = Op::ref_read(Side::Host, "alpha", "refs/heads/main");
     assert!(op.check_preconditions(&vm).is_ok());
 }
 
-#[test]
-fn precondition_ref_write_container_rejects_dirty() {
+#[tokio::test]
+async fn precondition_ref_write_container_rejects_dirty() {
     let mut vm = test_vm();
     let mut repo = repo_with_refs("aaa", "bbb", "ccc");
     repo.container_clean = false;
@@ -56,16 +56,16 @@ fn precondition_ref_write_container_rejects_dirty() {
     assert!(op.check_preconditions(&vm).is_err());
 }
 
-#[test]
-fn precondition_ref_write_host_passes_when_clean() {
+#[tokio::test]
+async fn precondition_ref_write_host_passes_when_clean() {
     let mut vm = test_vm();
     vm.set_repo("alpha", repo_with_refs("aaa", "bbb", "ccc"));
     let op = Op::ref_write(Side::Host, "alpha", "refs/heads/main", "ddd");
     assert!(op.check_preconditions(&vm).is_ok());
 }
 
-#[test]
-fn precondition_checkout_rejects_host_mid_merge() {
+#[tokio::test]
+async fn precondition_checkout_rejects_host_mid_merge() {
     let mut vm = test_vm();
     let mut repo = repo_with_refs("aaa", "bbb", "ccc");
     repo.host_merge_state = HostMergeState::Merging;
@@ -75,8 +75,8 @@ fn precondition_checkout_rejects_host_mid_merge() {
     assert!(op.check_preconditions(&vm).is_err());
 }
 
-#[test]
-fn precondition_checkout_container_passes_during_host_merge() {
+#[tokio::test]
+async fn precondition_checkout_container_passes_during_host_merge() {
     let mut vm = test_vm();
     let mut repo = repo_with_refs("aaa", "bbb", "ccc");
     repo.host_merge_state = HostMergeState::Merging;
@@ -86,8 +86,8 @@ fn precondition_checkout_container_passes_during_host_merge() {
     assert!(op.check_preconditions(&vm).is_ok());
 }
 
-#[test]
-fn precondition_commit_rejects_unresolved_conflicts() {
+#[tokio::test]
+async fn precondition_commit_rejects_unresolved_conflicts() {
     let mut vm = test_vm();
     let mut repo = repo_with_refs("aaa", "bbb", "ccc");
     repo.host_merge_state = HostMergeState::Conflicted;
@@ -97,8 +97,8 @@ fn precondition_commit_rejects_unresolved_conflicts() {
     assert!(op.check_preconditions(&vm).is_err());
 }
 
-#[test]
-fn precondition_bundle_create_requires_container_present() {
+#[tokio::test]
+async fn precondition_bundle_create_requires_container_present() {
     let mut vm = test_vm();
     vm.set_repo("alpha", repo_absent());
 
@@ -106,16 +106,16 @@ fn precondition_bundle_create_requires_container_present() {
     assert!(op.check_preconditions(&vm).is_err());
 }
 
-#[test]
-fn precondition_bundle_create_passes_with_container() {
+#[tokio::test]
+async fn precondition_bundle_create_passes_with_container() {
     let mut vm = test_vm();
     vm.set_repo("alpha", repo_with_refs("aaa", "bbb", "ccc"));
     let op = Op::bundle_create("alpha");
     assert!(op.check_preconditions(&vm).is_ok());
 }
 
-#[test]
-fn precondition_try_merge_requires_repo() {
+#[tokio::test]
+async fn precondition_try_merge_requires_repo() {
     let vm = test_vm();
     let op = Op::TryMerge {
         repo: "missing".into(),
@@ -128,15 +128,15 @@ fn precondition_try_merge_requires_repo() {
     assert!(op.check_preconditions(&vm).is_err());
 }
 
-#[test]
-fn precondition_confirm_always_passes() {
+#[tokio::test]
+async fn precondition_confirm_always_passes() {
     let vm = test_vm();
     let op = Op::confirm("proceed?");
     assert!(op.check_preconditions(&vm).is_ok());
 }
 
-#[test]
-fn precondition_interactive_session_always_passes() {
+#[tokio::test]
+async fn precondition_interactive_session_always_passes() {
     let vm = test_vm();
     let op = Op::InteractiveSession {
         prompt: Some("hello".into()),
@@ -149,8 +149,8 @@ fn precondition_interactive_session_always_passes() {
 // Postcondition tests
 // ============================================================================
 
-#[test]
-fn postcondition_ref_write_updates_container() {
+#[tokio::test]
+async fn postcondition_ref_write_updates_container() {
     let mut vm = test_vm();
     vm.set_repo("alpha", repo_with_refs("aaa", "bbb", "ccc"));
 
@@ -162,8 +162,8 @@ fn postcondition_ref_write_updates_container() {
     assert_eq!(vm.repo("alpha").unwrap().target, RefState::At("ccc".into()));
 }
 
-#[test]
-fn postcondition_ref_write_host_session_branch() {
+#[tokio::test]
+async fn postcondition_ref_write_host_session_branch() {
     let mut vm = SyncVM::new("mysession", "main");
     vm.set_repo("alpha", repo_with_refs("aaa", "bbb", "ccc"));
 
@@ -175,8 +175,8 @@ fn postcondition_ref_write_host_session_branch() {
     assert_eq!(vm.repo("alpha").unwrap().target, RefState::At("ccc".into()));
 }
 
-#[test]
-fn postcondition_ref_write_host_target_branch() {
+#[tokio::test]
+async fn postcondition_ref_write_host_target_branch() {
     let mut vm = SyncVM::new("mysession", "main");
     vm.set_repo("alpha", repo_with_refs("aaa", "bbb", "ccc"));
 
@@ -187,8 +187,8 @@ fn postcondition_ref_write_host_target_branch() {
     assert_eq!(vm.repo("alpha").unwrap().session, RefState::At("bbb".into()));
 }
 
-#[test]
-fn postcondition_bundle_fetch_updates_session() {
+#[tokio::test]
+async fn postcondition_bundle_fetch_updates_session() {
     let mut vm = test_vm();
     vm.set_repo("alpha", repo_with_refs("aaa", "bbb", "ccc"));
 
@@ -198,8 +198,8 @@ fn postcondition_bundle_fetch_updates_session() {
     assert_eq!(vm.repo("alpha").unwrap().session, RefState::At("fetched123".into()));
 }
 
-#[test]
-fn postcondition_checkout_clears_host_merge_state() {
+#[tokio::test]
+async fn postcondition_checkout_clears_host_merge_state() {
     let mut vm = test_vm();
     let mut repo = repo_with_refs("aaa", "bbb", "ccc");
     repo.host_merge_state = HostMergeState::Merging;
@@ -211,8 +211,8 @@ fn postcondition_checkout_clears_host_merge_state() {
     assert_eq!(vm.repo("alpha").unwrap().host_merge_state, HostMergeState::Clean);
 }
 
-#[test]
-fn postcondition_checkout_container_clears_conflict() {
+#[tokio::test]
+async fn postcondition_checkout_container_clears_conflict() {
     let mut vm = test_vm();
     let mut repo = repo_with_refs("aaa", "bbb", "ccc");
     repo.conflict = ConflictState::Markers(vec!["file.rs".into()]);
@@ -224,8 +224,8 @@ fn postcondition_checkout_container_clears_conflict() {
     assert_eq!(vm.repo("alpha").unwrap().conflict, ConflictState::Clean);
 }
 
-#[test]
-fn postcondition_commit_updates_target() {
+#[tokio::test]
+async fn postcondition_commit_updates_target() {
     let mut vm = test_vm();
     vm.set_repo("alpha", repo_with_refs("aaa", "bbb", "ccc"));
 
@@ -236,8 +236,8 @@ fn postcondition_commit_updates_target() {
     assert_eq!(vm.repo("alpha").unwrap().host_merge_state, HostMergeState::Clean);
 }
 
-#[test]
-fn postcondition_agent_run_success_updates_container() {
+#[tokio::test]
+async fn postcondition_agent_run_success_updates_container() {
     let mut vm = test_vm();
     let mut repo = repo_with_refs("aaa", "bbb", "ccc");
     repo.conflict = ConflictState::Markers(vec!["conflict.rs".into()]);
@@ -260,8 +260,8 @@ fn postcondition_agent_run_success_updates_container() {
     assert_eq!(vm.repo("alpha").unwrap().container, RefState::At("resolved_head".into()));
 }
 
-#[test]
-fn postcondition_agent_run_failure_keeps_conflict() {
+#[tokio::test]
+async fn postcondition_agent_run_failure_keeps_conflict() {
     let mut vm = test_vm();
     let mut repo = repo_with_refs("aaa", "bbb", "ccc");
     repo.conflict = ConflictState::Markers(vec!["conflict.rs".into()]);
@@ -284,8 +284,8 @@ fn postcondition_agent_run_failure_keeps_conflict() {
     assert_eq!(vm.repo("alpha").unwrap().container, RefState::At("aaa".into()));
 }
 
-#[test]
-fn postcondition_interactive_session_invalidates_all_state() {
+#[tokio::test]
+async fn postcondition_interactive_session_invalidates_all_state() {
     let mut vm = test_vm();
     vm.set_repo("alpha", repo_with_refs("aaa", "bbb", "ccc"));
     vm.set_repo("beta", repo_with_refs("ddd", "eee", "fff"));
@@ -299,8 +299,8 @@ fn postcondition_interactive_session_invalidates_all_state() {
     assert_eq!(vm.repo("beta").unwrap().target, RefState::At("fff".into()));
 }
 
-#[test]
-fn postcondition_read_ops_dont_change_state() {
+#[tokio::test]
+async fn postcondition_read_ops_dont_change_state() {
     let mut vm = test_vm();
     vm.set_repo("alpha", repo_with_refs("aaa", "bbb", "ccc"));
 
@@ -327,38 +327,38 @@ fn postcondition_read_ops_dont_change_state() {
 // Trace + state construction tests
 // ============================================================================
 
-#[test]
-fn trace_records_operations() {
+#[tokio::test]
+async fn trace_records_operations() {
     let mut vm = test_vm();
     vm.record(Op::ref_read(Side::Host, "alpha", "refs/heads/main"), OpOutcome::Ok);
     vm.record(Op::confirm("proceed?"), OpOutcome::OkWithValue("yes".into()));
     assert_eq!(vm.trace.len(), 2);
 }
 
-#[test]
-fn repo_vm_empty_is_all_absent() {
+#[tokio::test]
+async fn repo_vm_empty_is_all_absent() {
     let repo = RepoVM::empty(None);
     assert_eq!(repo.container, RefState::Absent);
     assert_eq!(repo.session, RefState::Absent);
     assert_eq!(repo.target, RefState::Absent);
 }
 
-#[test]
-fn repo_vm_from_refs_sets_heads() {
+#[tokio::test]
+async fn repo_vm_from_refs_sets_heads() {
     let repo = repo_with_refs("aaa", "bbb", "ccc");
     assert_eq!(repo.container, RefState::At("aaa".into()));
     assert_eq!(repo.session, RefState::At("bbb".into()));
     assert_eq!(repo.target, RefState::At("ccc".into()));
 }
 
-#[test]
-fn ref_state_hash_returns_value() {
+#[tokio::test]
+async fn ref_state_hash_returns_value() {
     assert_eq!(RefState::At("abc".into()).hash(), Some("abc"));
     assert_eq!(RefState::Absent.hash(), None);
 }
 
-#[test]
-fn sync_vm_manages_repos() {
+#[tokio::test]
+async fn sync_vm_manages_repos() {
     let mut vm = test_vm();
     assert!(vm.repo("alpha").is_none());
     vm.set_repo("alpha", repo_with_refs("a", "b", "c"));
@@ -369,8 +369,8 @@ fn sync_vm_manages_repos() {
 // Interpreter tests — run ops through the VM with MockBackend
 // ============================================================================
 
-#[test]
-fn interpreter_runs_primitive_sequence() {
+#[tokio::test]
+async fn interpreter_runs_primitive_sequence() {
     let mock = MockBackend::new();
     mock.on(CallMatcher::BundleCreate, MockResult::Hash("/tmp/alpha.bundle".into()));
     mock.on(CallMatcher::BundleFetch, MockResult::Hash("fetched_abc".into()));
@@ -382,7 +382,7 @@ fn interpreter_runs_primitive_sequence() {
         Op::bundle_create("alpha"),
         Op::bundle_fetch("alpha", "/tmp/alpha.bundle"),
         Op::ref_write(Side::Host, "alpha", "refs/heads/test-session", "fetched_abc"),
-    ]);
+    ]).await;
 
     assert_eq!(result.succeeded(), 3);
     assert!(!result.halted);
@@ -395,22 +395,22 @@ fn interpreter_runs_primitive_sequence() {
     assert!(matches!(calls[2], RecordedCall::RefWrite { .. }));
 }
 
-#[test]
-fn interpreter_halts_on_precondition_failure() {
+#[tokio::test]
+async fn interpreter_halts_on_precondition_failure() {
     let mock = MockBackend::new();
     let mut vm = test_vm();
 
     let result = vm.run(&mock, vec![
         Op::bundle_create("alpha"),
-    ]);
+    ]).await;
 
     assert!(result.halted);
     assert_eq!(result.succeeded(), 0);
     assert!(mock.calls().is_empty());
 }
 
-#[test]
-fn interpreter_halts_on_backend_error() {
+#[tokio::test]
+async fn interpreter_halts_on_backend_error() {
     let mock = MockBackend::new();
     mock.on(CallMatcher::BundleCreate, MockResult::Error("disk full".into()));
 
@@ -420,15 +420,15 @@ fn interpreter_halts_on_backend_error() {
     let result = vm.run(&mock, vec![
         Op::bundle_create("alpha"),
         Op::ref_write(Side::Host, "alpha", "refs/heads/main", "ddd"),
-    ]);
+    ]).await;
 
     assert!(result.halted);
     assert_eq!(result.outcomes.len(), 1);
     assert_eq!(vm.repo("alpha").unwrap().session, RefState::At("bbb".into()));
 }
 
-#[test]
-fn interpreter_confirm_decline_halts() {
+#[tokio::test]
+async fn interpreter_confirm_decline_halts() {
     let mock = MockBackend::new();
     mock.on(CallMatcher::PromptUser, MockResult::Bool(false));
 
@@ -438,14 +438,14 @@ fn interpreter_confirm_decline_halts() {
     let result = vm.run(&mock, vec![
         Op::confirm("proceed?"),
         Op::ref_write(Side::Host, "alpha", "refs/heads/main", "ddd"),
-    ]);
+    ]).await;
 
     assert!(result.halted);
     assert_eq!(vm.repo("alpha").unwrap().target, RefState::At("ccc".into()));
 }
 
-#[test]
-fn interpreter_confirm_accept_continues() {
+#[tokio::test]
+async fn interpreter_confirm_accept_continues() {
     let mock = MockBackend::new();
     mock.on(CallMatcher::PromptUser, MockResult::Bool(true));
 
@@ -455,14 +455,14 @@ fn interpreter_confirm_accept_continues() {
     let result = vm.run(&mock, vec![
         Op::confirm("proceed?"),
         Op::ref_write(Side::Host, "alpha", "refs/heads/main", "ddd"),
-    ]);
+    ]).await;
 
     assert!(!result.halted);
     assert_eq!(result.succeeded(), 2);
 }
 
-#[test]
-fn interpreter_try_merge_follows_clean_path() {
+#[tokio::test]
+async fn interpreter_try_merge_follows_clean_path() {
     let mock = MockBackend::new();
     mock.on(CallMatcher::MergeTrees, MockResult::MergeClean("merged_tree".into()));
     mock.on(CallMatcher::Commit, MockResult::Hash("new_commit".into()));
@@ -483,7 +483,7 @@ fn interpreter_try_merge_follows_clean_path() {
             ],
             on_error: vec![],
         },
-    ]);
+    ]).await;
 
     assert!(!result.halted);
     assert_eq!(vm.repo("alpha").unwrap().target, RefState::At("new_commit".into()));
@@ -491,8 +491,8 @@ fn interpreter_try_merge_follows_clean_path() {
     assert!(mock.was_called(&CallMatcher::Commit));
 }
 
-#[test]
-fn interpreter_try_merge_follows_conflict_path() {
+#[tokio::test]
+async fn interpreter_try_merge_follows_conflict_path() {
     let mock = MockBackend::new();
     mock.on(CallMatcher::MergeTrees, MockResult::MergeConflict(vec!["shared.txt".into()]));
     mock.on(CallMatcher::AgentRun, MockResult::Hash("resolved_head".into()));
@@ -522,7 +522,7 @@ fn interpreter_try_merge_follows_conflict_path() {
             ],
             on_error: vec![],
         },
-    ]);
+    ]).await;
 
     assert!(!result.halted);
     assert!(mock.was_called(&CallMatcher::AgentRun));
@@ -531,8 +531,8 @@ fn interpreter_try_merge_follows_conflict_path() {
     assert_eq!(vm.repo("gamma").unwrap().conflict, ConflictState::Resolved);
 }
 
-#[test]
-fn interpreter_agent_failure_follows_failure_path() {
+#[tokio::test]
+async fn interpreter_agent_failure_follows_failure_path() {
     let mock = MockBackend::new();
     mock.on(CallMatcher::AgentRun, MockResult::Bool(false));
 
@@ -553,7 +553,7 @@ fn interpreter_agent_failure_follows_failure_path() {
                 Op::checkout(Side::Container, "alpha", "HEAD"),
             ],
         },
-    ]);
+    ]).await;
 
     assert!(!result.halted);
     assert!(!mock.was_called(&CallMatcher::BundleCreate));
@@ -561,8 +561,8 @@ fn interpreter_agent_failure_follows_failure_path() {
     assert_eq!(vm.repo("alpha").unwrap().conflict, ConflictState::Clean);
 }
 
-#[test]
-fn interpreter_interactive_session_invalidates_state() {
+#[tokio::test]
+async fn interpreter_interactive_session_invalidates_state() {
     let mock = MockBackend::new();
     mock.on(CallMatcher::InteractiveSession, MockResult::ContainerExited(0));
 
@@ -572,15 +572,15 @@ fn interpreter_interactive_session_invalidates_state() {
 
     let result = vm.run(&mock, vec![
         Op::InteractiveSession { prompt: Some("hello".into()), on_exit: vec![] },
-    ]);
+    ]).await;
 
     assert!(!result.halted);
     assert_eq!(vm.repo("alpha").unwrap().container, RefState::Absent);
     assert_eq!(vm.repo("beta").unwrap().container, RefState::Absent);
 }
 
-#[test]
-fn interpreter_state_unchanged_on_backend_error() {
+#[tokio::test]
+async fn interpreter_state_unchanged_on_backend_error() {
     let mock = MockBackend::new();
     mock.on(CallMatcher::RefWrite, MockResult::Error("permission denied".into()));
 
@@ -589,7 +589,7 @@ fn interpreter_state_unchanged_on_backend_error() {
 
     let result = vm.run(&mock, vec![
         Op::ref_write(Side::Host, "alpha", "refs/heads/main", "new_hash"),
-    ]);
+    ]).await;
 
     assert!(result.halted);
     assert_eq!(vm.repo("alpha").unwrap().target, RefState::At("ccc".into()));
@@ -673,28 +673,28 @@ fn assert_no_markers(path: &Path, branch_name: &str) {
     }).unwrap();
 }
 
-#[test]
-fn git2_ref_read_and_write() {
+#[tokio::test]
+async fn git2_ref_read_and_write() {
     let (_tmp, path) = make_repo("ref-rw");
     let backend = Git2Backend::new();
 
-    let head = backend.ref_read(&path, "refs/heads/main").unwrap();
+    let head = backend.ref_read(&path, "refs/heads/main").await.unwrap();
     assert!(head.is_some());
 
-    let missing = backend.ref_read(&path, "refs/heads/nonexistent").unwrap();
+    let missing = backend.ref_read(&path, "refs/heads/nonexistent").await.unwrap();
     assert!(missing.is_none());
 }
 
-#[test]
-fn git2_ancestry_same() {
+#[tokio::test]
+async fn git2_ancestry_same() {
     let (_tmp, path) = make_repo("anc-same");
     let backend = Git2Backend::new();
     let h = head_of(&path, "main");
-    assert_eq!(backend.ancestry_check(&path, &h, &h).unwrap(), AncestryResult::Same);
+    assert_eq!(backend.ancestry_check(&path, &h, &h).await.unwrap(), AncestryResult::Same);
 }
 
-#[test]
-fn git2_ancestry_ahead() {
+#[tokio::test]
+async fn git2_ancestry_ahead() {
     let (_tmp, path) = make_repo("anc-ahead");
     let before = head_of(&path, "main");
     commit_file(&path, "a.txt", "a", "c1");
@@ -702,12 +702,12 @@ fn git2_ancestry_ahead() {
     let after = head_of(&path, "main");
 
     let backend = Git2Backend::new();
-    let result = backend.ancestry_check(&path, &before, &after).unwrap();
+    let result = backend.ancestry_check(&path, &before, &after).await.unwrap();
     assert!(matches!(result, AncestryResult::AIsAncestorOfB { distance: 2 }));
 }
 
-#[test]
-fn git2_ancestry_diverged() {
+#[tokio::test]
+async fn git2_ancestry_diverged() {
     let (_tmp, path) = make_repo("anc-div");
     git_branch(&path, "session");
     commit_file(&path, "main.txt", "m", "main");
@@ -718,12 +718,12 @@ fn git2_ancestry_diverged() {
     let session_h = head_of(&path, "session");
 
     let backend = Git2Backend::new();
-    let result = backend.ancestry_check(&path, &main_h, &session_h).unwrap();
+    let result = backend.ancestry_check(&path, &main_h, &session_h).await.unwrap();
     assert!(matches!(result, AncestryResult::Diverged { a_ahead: 1, b_ahead: 1, .. }));
 }
 
-#[test]
-fn git2_merge_trees_clean() {
+#[tokio::test]
+async fn git2_merge_trees_clean() {
     let (_tmp, path) = make_repo("merge-clean");
     git_branch(&path, "session");
     commit_file(&path, "main.txt", "m", "main");
@@ -734,14 +734,14 @@ fn git2_merge_trees_clean() {
     let session_h = head_of(&path, "session");
 
     let backend = Git2Backend::new();
-    let (clean, tree, conflicts) = backend.merge_trees(&path, &main_h, &session_h).unwrap();
+    let (clean, tree, conflicts) = backend.merge_trees(&path, &main_h, &session_h).await.unwrap();
     assert!(clean);
     assert!(tree.is_some());
     assert!(conflicts.is_empty());
 }
 
-#[test]
-fn git2_merge_trees_conflict() {
+#[tokio::test]
+async fn git2_merge_trees_conflict() {
     let (_tmp, path) = make_repo("merge-conflict");
     commit_file(&path, "shared.txt", "original", "base");
     git_branch(&path, "session");
@@ -754,13 +754,13 @@ fn git2_merge_trees_conflict() {
     let session_h = head_of(&path, "session");
 
     let backend = Git2Backend::new();
-    let (clean, _, conflicts) = backend.merge_trees(&path, &main_h, &session_h).unwrap();
+    let (clean, _, conflicts) = backend.merge_trees(&path, &main_h, &session_h).await.unwrap();
     assert!(!clean);
     assert!(conflicts.contains(&"shared.txt".to_string()));
 }
 
-#[test]
-fn git2_vm_merge_advances_target() {
+#[tokio::test]
+async fn git2_vm_merge_advances_target() {
     let (_tmp, path) = make_repo("vm-merge");
     git_branch(&path, "session");
     git_switch(&path, "session");
@@ -774,7 +774,7 @@ fn git2_vm_merge_advances_target() {
     let backend = Git2Backend::new();
 
     // Merge trees to get the merged tree hash
-    let (clean, tree, _) = backend.merge_trees(&path, &main_before, &session_h).unwrap();
+    let (clean, tree, _) = backend.merge_trees(&path, &main_before, &session_h).await.unwrap();
     assert!(clean);
     let tree_hash = tree.unwrap();
 
@@ -789,7 +789,7 @@ fn git2_vm_merge_advances_target() {
     let result = vm.run(&backend, vec![
         Op::checkout(Side::Host, "repo", "refs/heads/main"),
         Op::commit("repo", &tree_hash, &[&main_before], "squash merge"),
-    ]);
+    ]).await;
 
     assert!(!result.halted, "halted: {:?}", result.halt_reason);
     let main_after = head_of(&path, "main");
@@ -797,8 +797,8 @@ fn git2_vm_merge_advances_target() {
     assert_no_markers(&path, "main");
 }
 
-#[test]
-fn git2_vm_conflict_target_unchanged() {
+#[tokio::test]
+async fn git2_vm_conflict_target_unchanged() {
     let (_tmp, path) = make_repo("vm-conflict");
     commit_file(&path, "shared.txt", "original", "base");
     git_branch(&path, "session");
@@ -831,15 +831,15 @@ fn git2_vm_conflict_target_unchanged() {
             on_conflict: vec![],
             on_error: vec![],
         },
-    ]);
+    ]).await;
 
     assert!(!result.halted);
     assert_eq!(head_of(&path, "main"), main_h, "target unchanged after conflict");
     assert_no_markers(&path, "main");
 }
 
-#[test]
-fn git2_temp_repo_cleaned_up_on_drop() {
+#[tokio::test]
+async fn git2_temp_repo_cleaned_up_on_drop() {
     let path = {
         let (_tmp, path) = make_repo("cleanup-test");
         assert!(path.join(".git").exists());
@@ -850,22 +850,22 @@ fn git2_temp_repo_cleaned_up_on_drop() {
 
 // ── ref_write: write a ref and read it back ──
 
-#[test]
-fn git2_ref_write_creates_branch() {
+#[tokio::test]
+async fn git2_ref_write_creates_branch() {
     let (_tmp, path) = make_repo("ref-write");
     let backend = Git2Backend::new();
 
     let main_h = head_of(&path, "main");
     // Write a new branch ref pointing at main's HEAD
-    backend.ref_write(&path, "refs/heads/new-branch", &main_h).unwrap();
+    backend.ref_write(&path, "refs/heads/new-branch", &main_h).await.unwrap();
 
     // Read it back
-    let read_back = backend.ref_read(&path, "refs/heads/new-branch").unwrap();
+    let read_back = backend.ref_read(&path, "refs/heads/new-branch").await.unwrap();
     assert_eq!(read_back, Some(main_h));
 }
 
-#[test]
-fn git2_ref_write_updates_existing() {
+#[tokio::test]
+async fn git2_ref_write_updates_existing() {
     let (_tmp, path) = make_repo("ref-update");
     let backend = Git2Backend::new();
 
@@ -875,44 +875,44 @@ fn git2_ref_write_updates_existing() {
     assert_ne!(old_head, new_head);
 
     // Create a branch at old HEAD
-    backend.ref_write(&path, "refs/heads/marker", &old_head).unwrap();
-    assert_eq!(backend.ref_read(&path, "refs/heads/marker").unwrap(), Some(old_head.clone()));
+    backend.ref_write(&path, "refs/heads/marker", &old_head).await.unwrap();
+    assert_eq!(backend.ref_read(&path, "refs/heads/marker").await.unwrap(), Some(old_head.clone()));
 
     // Update it to new HEAD
-    backend.ref_write(&path, "refs/heads/marker", &new_head).unwrap();
-    assert_eq!(backend.ref_read(&path, "refs/heads/marker").unwrap(), Some(new_head));
+    backend.ref_write(&path, "refs/heads/marker", &new_head).await.unwrap();
+    assert_eq!(backend.ref_read(&path, "refs/heads/marker").await.unwrap(), Some(new_head));
 }
 
 // ── tree_compare ──
 
-#[test]
-fn git2_tree_compare_identical() {
+#[tokio::test]
+async fn git2_tree_compare_identical() {
     let (_tmp, path) = make_repo("tree-same");
     let backend = Git2Backend::new();
     let h = head_of(&path, "main");
 
-    let (identical, files) = backend.tree_compare(&path, &h, &h).unwrap();
+    let (identical, files) = backend.tree_compare(&path, &h, &h).await.unwrap();
     assert!(identical);
     assert_eq!(files, 0);
 }
 
-#[test]
-fn git2_tree_compare_different() {
+#[tokio::test]
+async fn git2_tree_compare_different() {
     let (_tmp, path) = make_repo("tree-diff");
     let before = head_of(&path, "main");
     commit_file(&path, "new.txt", "content", "add file");
     let after = head_of(&path, "main");
 
     let backend = Git2Backend::new();
-    let (identical, files) = backend.tree_compare(&path, &before, &after).unwrap();
+    let (identical, files) = backend.tree_compare(&path, &before, &after).await.unwrap();
     assert!(!identical);
     assert_eq!(files, 1);
 }
 
 // ── checkout ──
 
-#[test]
-fn git2_checkout_switches_worktree() {
+#[tokio::test]
+async fn git2_checkout_switches_worktree() {
     let (_tmp, path) = make_repo("checkout");
     commit_file(&path, "main-only.txt", "main", "main file");
     git_branch(&path, "other");
@@ -923,7 +923,7 @@ fn git2_checkout_switches_worktree() {
     assert!(path.join("other-only.txt").exists());
 
     let backend = Git2Backend::new();
-    backend.checkout(&path, "refs/heads/main").unwrap();
+    backend.checkout(&path, "refs/heads/main").await.unwrap();
 
     // Worktree now has main-only.txt, not other-only.txt
     assert!(path.join("main-only.txt").exists());
@@ -932,8 +932,8 @@ fn git2_checkout_switches_worktree() {
 
 // ── commit ──
 
-#[test]
-fn git2_commit_creates_new_commit() {
+#[tokio::test]
+async fn git2_commit_creates_new_commit() {
     let (_tmp, path) = make_repo("commit");
     let backend = Git2Backend::new();
 
@@ -947,7 +947,7 @@ fn git2_commit_creates_new_commit() {
     let tree_hash = tree_oid.to_string();
     let parent = head_of(&path, "main");
 
-    let new_hash = backend.commit(&path, &tree_hash, &[parent.clone()], "test commit").unwrap();
+    let new_hash = backend.commit(&path, &tree_hash, &[parent.clone()], "test commit").await.unwrap();
     assert_ne!(new_hash, parent);
 
     // New commit is HEAD
@@ -957,49 +957,49 @@ fn git2_commit_creates_new_commit() {
 
 // ── error cases ──
 
-#[test]
-fn git2_ref_read_bad_path_returns_error() {
+#[tokio::test]
+async fn git2_ref_read_bad_path_returns_error() {
     let backend = Git2Backend::new();
-    let result = backend.ref_read(Path::new("/nonexistent/repo"), "refs/heads/main");
+    let result = backend.ref_read(Path::new("/nonexistent/repo"), "refs/heads/main").await;
     assert!(result.is_err());
 }
 
-#[test]
-fn git2_ref_write_bad_hash_returns_error() {
+#[tokio::test]
+async fn git2_ref_write_bad_hash_returns_error() {
     let (_tmp, path) = make_repo("bad-hash");
     let backend = Git2Backend::new();
-    let result = backend.ref_write(&path, "refs/heads/test", "not-a-valid-hash");
+    let result = backend.ref_write(&path, "refs/heads/test", "not-a-valid-hash").await;
     assert!(result.is_err());
 }
 
-#[test]
-fn git2_merge_trees_bad_hash_returns_error() {
+#[tokio::test]
+async fn git2_merge_trees_bad_hash_returns_error() {
     let (_tmp, path) = make_repo("bad-merge");
     let backend = Git2Backend::new();
-    let result = backend.merge_trees(&path, "0000000000000000000000000000000000000000", "0000000000000000000000000000000000000000");
+    let result = backend.merge_trees(&path, "0000000000000000000000000000000000000000", "0000000000000000000000000000000000000000").await;
     assert!(result.is_err());
 }
 
 // ── Docker ops return errors ──
 
-#[test]
-fn git2_docker_ops_return_errors() {
+#[tokio::test]
+async fn git2_docker_ops_return_errors() {
     let backend = Git2Backend::new();
-    assert!(backend.bundle_create("session", "repo").is_err());
-    assert!(backend.bundle_fetch(Path::new("/tmp"), "/tmp/b").is_err());
-    assert!(backend.run_container("img", "script", &[]).is_err());
-    assert!(backend.agent_run(&AgentTask::Work, "", &[]).is_err());
-    assert!(backend.interactive_session(None, &[]).is_err());
+    assert!(backend.bundle_create("session", "repo").await.is_err());
+    assert!(backend.bundle_fetch(Path::new("/tmp"), "/tmp/b").await.is_err());
+    assert!(backend.run_container("img", "script", &[]).await.is_err());
+    assert!(backend.agent_run(&AgentTask::Work, "", &[]).await.is_err());
+    assert!(backend.interactive_session(None, &[]).await.is_err());
     // prompt_user auto-confirms in Git2Backend
-    assert_eq!(backend.prompt_user("test").unwrap(), true);
+    assert_eq!(backend.prompt_user("test").await.unwrap(), true);
 }
 
 // ============================================================================
 // Program generator tests — plan_push, plan_pull, plan_sync
 // ============================================================================
 
-#[test]
-fn plan_push_injects_when_target_differs() {
+#[tokio::test]
+async fn plan_push_injects_when_target_differs() {
     let mut vm = SyncVM::new("session", "main");
     vm.set_repo("alpha", RepoVM::from_refs(
         RefState::At("aaa".into()),  // container
@@ -1015,8 +1015,8 @@ fn plan_push_injects_when_target_differs() {
     assert!(ops.iter().any(|op| matches!(op, Op::BundleCreate { .. })));
 }
 
-#[test]
-fn plan_push_skips_when_in_sync() {
+#[tokio::test]
+async fn plan_push_skips_when_in_sync() {
     let mut vm = SyncVM::new("session", "main");
     vm.set_repo("alpha", RepoVM::from_refs(
         RefState::At("aaa".into()),
@@ -1029,8 +1029,8 @@ fn plan_push_skips_when_in_sync() {
     assert!(ops.is_empty(), "nothing to push when in sync");
 }
 
-#[test]
-fn plan_push_skips_host_dirty() {
+#[tokio::test]
+async fn plan_push_skips_host_dirty() {
     let mut vm = SyncVM::new("session", "main");
     let mut repo = RepoVM::from_refs(
         RefState::At("aaa".into()),
@@ -1045,8 +1045,8 @@ fn plan_push_skips_host_dirty() {
     assert!(!ops.is_empty(), "host dirty should not block push");
 }
 
-#[test]
-fn plan_pull_extracts_when_container_ahead() {
+#[tokio::test]
+async fn plan_pull_extracts_when_container_ahead() {
     let mut vm = SyncVM::new("session", "main");
     vm.set_repo("alpha", RepoVM::from_refs(
         RefState::At("bbb".into()),  // container ahead
@@ -1059,8 +1059,8 @@ fn plan_pull_extracts_when_container_ahead() {
     assert!(ops.iter().any(|op| matches!(op, Op::BundleCreate { .. })), "should extract");
 }
 
-#[test]
-fn plan_pull_merges_when_session_ahead_of_target() {
+#[tokio::test]
+async fn plan_pull_merges_when_session_ahead_of_target() {
     let mut vm = SyncVM::new("session", "main");
     vm.set_repo("alpha", RepoVM::from_refs(
         RefState::At("bbb".into()),  // container
@@ -1073,8 +1073,8 @@ fn plan_pull_merges_when_session_ahead_of_target() {
     assert!(ops.iter().any(|op| matches!(op, Op::TryMerge { .. })), "should merge");
 }
 
-#[test]
-fn plan_pull_skips_when_in_sync() {
+#[tokio::test]
+async fn plan_pull_skips_when_in_sync() {
     let mut vm = SyncVM::new("session", "main");
     vm.set_repo("alpha", RepoVM::from_refs(
         RefState::At("aaa".into()),
@@ -1087,8 +1087,8 @@ fn plan_pull_skips_when_in_sync() {
     assert!(ops.is_empty(), "nothing to pull when in sync");
 }
 
-#[test]
-fn plan_pull_blocked_when_host_dirty() {
+#[tokio::test]
+async fn plan_pull_blocked_when_host_dirty() {
     let mut vm = SyncVM::new("session", "main");
     let mut repo = RepoVM::from_refs(
         RefState::At("bbb".into()),
@@ -1103,8 +1103,8 @@ fn plan_pull_blocked_when_host_dirty() {
     assert!(ops.is_empty(), "host dirty should block pull");
 }
 
-#[test]
-fn plan_sync_push_before_pull() {
+#[tokio::test]
+async fn plan_sync_push_before_pull() {
     let mut vm = SyncVM::new("session", "main");
     vm.set_repo("alpha", RepoVM::from_refs(
         RefState::At("bbb".into()),  // container ahead (pull needed)
@@ -1124,8 +1124,8 @@ fn plan_sync_push_before_pull() {
     }
 }
 
-#[test]
-fn plan_sync_empty_when_in_sync() {
+#[tokio::test]
+async fn plan_sync_empty_when_in_sync() {
     let mut vm = SyncVM::new("session", "main");
     vm.set_repo("alpha", RepoVM::from_refs(
         RefState::At("aaa".into()),
@@ -1142,8 +1142,8 @@ fn plan_sync_empty_when_in_sync() {
 // Compound builder tests
 // ============================================================================
 
-#[test]
-fn ops_extract_produces_bundle_sequence() {
+#[tokio::test]
+async fn ops_extract_produces_bundle_sequence() {
     let ops = ops_extract("alpha", "session");
     assert_eq!(ops.len(), 3);
     assert!(matches!(ops[0], Op::BundleCreate { .. }));
@@ -1151,15 +1151,15 @@ fn ops_extract_produces_bundle_sequence() {
     assert!(matches!(ops[2], Op::RefWrite { .. }));
 }
 
-#[test]
-fn ops_inject_produces_run_container() {
+#[tokio::test]
+async fn ops_inject_produces_run_container() {
     let ops = ops_inject("alpha", "main");
     assert_eq!(ops.len(), 1);
     assert!(matches!(ops[0], Op::RunContainer { .. }));
 }
 
-#[test]
-fn ops_merge_produces_try_merge() {
+#[tokio::test]
+async fn ops_merge_produces_try_merge() {
     let op = ops_merge("alpha", "session_h", "target_h", "main", true);
     assert!(matches!(op, Op::TryMerge { .. }));
     if let Op::TryMerge { on_clean, on_error, .. } = &op {
@@ -1168,15 +1168,15 @@ fn ops_merge_produces_try_merge() {
     }
 }
 
-#[test]
-fn ops_clone_produces_run_container() {
+#[tokio::test]
+async fn ops_clone_produces_run_container() {
     let ops = ops_clone("alpha");
     assert_eq!(ops.len(), 1);
     assert!(matches!(ops[0], Op::RunContainer { .. }));
 }
 
-#[test]
-fn ops_reconcile_with_agent_has_agent_run() {
+#[tokio::test]
+async fn ops_reconcile_with_agent_has_agent_run() {
     let ops = ops_reconcile_with_agent("alpha", "session", "target_h", "main", vec!["file.rs".into()]);
     assert!(ops.iter().any(|op| matches!(op, Op::AgentRun { .. })), "should have agent run");
 }
@@ -1185,8 +1185,8 @@ fn ops_reconcile_with_agent_has_agent_run() {
 // Display tests
 // ============================================================================
 
-#[test]
-fn display_primitive_ops() {
+#[tokio::test]
+async fn display_primitive_ops() {
     let ops = vec![
         Op::ref_read(Side::Host, "alpha", "refs/heads/main"),
         Op::ref_write(Side::Host, "alpha", "refs/heads/main", "abc1234def"),
@@ -1201,15 +1201,15 @@ fn display_primitive_ops() {
     }
 }
 
-#[test]
-fn display_compound_ops() {
+#[tokio::test]
+async fn display_compound_ops() {
     let op = ops_merge("alpha", "session_h", "target_h", "main", true);
     let s = format!("{}", op);
     assert!(s.contains("try-merge"), "display: {}", s);
 }
 
-#[test]
-fn render_program_shows_numbered_steps() {
+#[tokio::test]
+async fn render_program_shows_numbered_steps() {
     let ops = vec![
         Op::bundle_create("alpha"),
         Op::bundle_fetch("alpha", "/tmp/bundle"),
@@ -1223,8 +1223,8 @@ fn render_program_shows_numbered_steps() {
     assert!(output.contains("bundle-fetch"));
 }
 
-#[test]
-fn render_program_shows_compound_branches() {
+#[tokio::test]
+async fn render_program_shows_compound_branches() {
     let op = ops_merge("alpha", "s", "t", "main", true);
     let output = render_program(&[op], 0);
     assert!(output.contains("try-merge"));

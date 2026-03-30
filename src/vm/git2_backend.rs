@@ -18,7 +18,7 @@ impl Git2Backend {
 }
 
 impl VmBackend for Git2Backend {
-    fn ref_read(&self, repo_path: &Path, ref_name: &str) -> Result<Option<String>, VmBackendError> {
+    async fn ref_read(&self, repo_path: &Path, ref_name: &str) -> Result<Option<String>, VmBackendError> {
         let repo = open(repo_path)?;
         let reference = match repo.find_reference(ref_name) {
             Ok(r) => r,
@@ -28,7 +28,7 @@ impl VmBackend for Git2Backend {
         Ok(Some(commit.id().to_string()))
     }
 
-    fn ref_write(&self, repo_path: &Path, ref_name: &str, hash: &str) -> Result<(), VmBackendError> {
+    async fn ref_write(&self, repo_path: &Path, ref_name: &str, hash: &str) -> Result<(), VmBackendError> {
         let repo = open(repo_path)?;
         let oid = git2::Oid::from_str(hash).map_err(|e| VmBackendError::Failed(e.to_string()))?;
         repo.reference(ref_name, oid, true, "vm: ref_write")
@@ -36,7 +36,7 @@ impl VmBackend for Git2Backend {
         Ok(())
     }
 
-    fn tree_compare(&self, repo_path: &Path, a: &str, b: &str) -> Result<(bool, u32), VmBackendError> {
+    async fn tree_compare(&self, repo_path: &Path, a: &str, b: &str) -> Result<(bool, u32), VmBackendError> {
         let repo = open(repo_path)?;
         let oid_a = git2::Oid::from_str(a).map_err(|e| VmBackendError::Failed(e.to_string()))?;
         let oid_b = git2::Oid::from_str(b).map_err(|e| VmBackendError::Failed(e.to_string()))?;
@@ -55,7 +55,7 @@ impl VmBackend for Git2Backend {
         }
     }
 
-    fn ancestry_check(&self, repo_path: &Path, a: &str, b: &str) -> Result<AncestryResult, VmBackendError> {
+    async fn ancestry_check(&self, repo_path: &Path, a: &str, b: &str) -> Result<AncestryResult, VmBackendError> {
         let repo = open(repo_path)?;
         let oid_a = git2::Oid::from_str(a).map_err(|e| VmBackendError::Failed(e.to_string()))?;
         let oid_b = git2::Oid::from_str(b).map_err(|e| VmBackendError::Failed(e.to_string()))?;
@@ -89,7 +89,7 @@ impl VmBackend for Git2Backend {
         }
     }
 
-    fn merge_trees(&self, repo_path: &Path, ours: &str, theirs: &str) -> Result<(bool, Option<String>, Vec<String>), VmBackendError> {
+    async fn merge_trees(&self, repo_path: &Path, ours: &str, theirs: &str) -> Result<(bool, Option<String>, Vec<String>), VmBackendError> {
         let repo = open(repo_path)?;
         let oid_ours = git2::Oid::from_str(ours).map_err(|e| VmBackendError::Failed(e.to_string()))?;
         let oid_theirs = git2::Oid::from_str(theirs).map_err(|e| VmBackendError::Failed(e.to_string()))?;
@@ -125,7 +125,7 @@ impl VmBackend for Git2Backend {
         }
     }
 
-    fn checkout(&self, repo_path: &Path, ref_name: &str) -> Result<(), VmBackendError> {
+    async fn checkout(&self, repo_path: &Path, ref_name: &str) -> Result<(), VmBackendError> {
         let repo = open(repo_path)?;
         repo.set_head(ref_name).map_err(|e| VmBackendError::Failed(e.to_string()))?;
         repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
@@ -133,7 +133,7 @@ impl VmBackend for Git2Backend {
         Ok(())
     }
 
-    fn commit(&self, repo_path: &Path, tree: &str, parents: &[String], message: &str) -> Result<String, VmBackendError> {
+    async fn commit(&self, repo_path: &Path, tree: &str, parents: &[String], message: &str) -> Result<String, VmBackendError> {
         let repo = open(repo_path)?;
         let tree_oid = git2::Oid::from_str(tree).map_err(|e| VmBackendError::Failed(e.to_string()))?;
         let tree_obj = repo.find_tree(tree_oid).map_err(|e| VmBackendError::Failed(e.to_string()))?;
@@ -157,22 +157,22 @@ impl VmBackend for Git2Backend {
     }
 
     // Transport ops — require Docker, not available in Git2Backend
-    fn bundle_create(&self, _session: &str, _repo: &str) -> Result<String, VmBackendError> {
+    async fn bundle_create(&self, _session: &str, _repo: &str) -> Result<String, VmBackendError> {
         Err(VmBackendError::Failed("bundle_create requires Docker (use MockBackend or RealBackend)".into()))
     }
-    fn bundle_fetch(&self, _repo_path: &Path, _bundle_path: &str) -> Result<String, VmBackendError> {
+    async fn bundle_fetch(&self, _repo_path: &Path, _bundle_path: &str) -> Result<String, VmBackendError> {
         Err(VmBackendError::Failed("bundle_fetch requires Docker (use MockBackend or RealBackend)".into()))
     }
-    fn run_container(&self, _image: &str, _script: &str, _mounts: &[Mount]) -> Result<(i64, String), VmBackendError> {
+    async fn run_container(&self, _image: &str, _script: &str, _mounts: &[Mount]) -> Result<(i64, String), VmBackendError> {
         Err(VmBackendError::Failed("run_container requires Docker".into()))
     }
-    fn agent_run(&self, _task: &AgentTask, _context: &str, _mounts: &[Mount]) -> Result<(bool, Option<String>, Option<String>), VmBackendError> {
+    async fn agent_run(&self, _task: &AgentTask, _context: &str, _mounts: &[Mount]) -> Result<(bool, Option<String>, Option<String>), VmBackendError> {
         Err(VmBackendError::Failed("agent_run requires Docker".into()))
     }
-    fn interactive_session(&self, _prompt: Option<&str>, _mounts: &[Mount]) -> Result<i64, VmBackendError> {
+    async fn interactive_session(&self, _prompt: Option<&str>, _mounts: &[Mount]) -> Result<i64, VmBackendError> {
         Err(VmBackendError::Failed("interactive_session requires Docker".into()))
     }
-    fn prompt_user(&self, _message: &str) -> Result<bool, VmBackendError> {
+    async fn prompt_user(&self, _message: &str) -> Result<bool, VmBackendError> {
         Ok(true) // auto-confirm in tests
     }
 }

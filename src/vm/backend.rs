@@ -24,19 +24,19 @@ impl std::error::Error for VmBackendError {}
 
 /// Primitive-level backend — one method per atomic operation.
 pub trait VmBackend: Send + Sync {
-    fn ref_read(&self, repo_path: &Path, ref_name: &str) -> Result<Option<String>, VmBackendError>;
-    fn ref_write(&self, repo_path: &Path, ref_name: &str, hash: &str) -> Result<(), VmBackendError>;
-    fn tree_compare(&self, repo_path: &Path, a: &str, b: &str) -> Result<(bool, u32), VmBackendError>;
-    fn ancestry_check(&self, repo_path: &Path, a: &str, b: &str) -> Result<super::AncestryResult, VmBackendError>;
-    fn merge_trees(&self, repo_path: &Path, ours: &str, theirs: &str) -> Result<(bool, Option<String>, Vec<String>), VmBackendError>;
-    fn checkout(&self, repo_path: &Path, ref_name: &str) -> Result<(), VmBackendError>;
-    fn commit(&self, repo_path: &Path, tree: &str, parents: &[String], message: &str) -> Result<String, VmBackendError>;
-    fn bundle_create(&self, session: &str, repo: &str) -> Result<String, VmBackendError>;
-    fn bundle_fetch(&self, repo_path: &Path, bundle_path: &str) -> Result<String, VmBackendError>;
-    fn run_container(&self, image: &str, script: &str, mounts: &[Mount]) -> Result<(i64, String), VmBackendError>;
-    fn agent_run(&self, task: &super::AgentTask, context: &str, mounts: &[Mount]) -> Result<(bool, Option<String>, Option<String>), VmBackendError>;
-    fn interactive_session(&self, prompt: Option<&str>, mounts: &[Mount]) -> Result<i64, VmBackendError>;
-    fn prompt_user(&self, message: &str) -> Result<bool, VmBackendError>;
+    async fn ref_read(&self, repo_path: &Path, ref_name: &str) -> Result<Option<String>, VmBackendError>;
+    async fn ref_write(&self, repo_path: &Path, ref_name: &str, hash: &str) -> Result<(), VmBackendError>;
+    async fn tree_compare(&self, repo_path: &Path, a: &str, b: &str) -> Result<(bool, u32), VmBackendError>;
+    async fn ancestry_check(&self, repo_path: &Path, a: &str, b: &str) -> Result<super::AncestryResult, VmBackendError>;
+    async fn merge_trees(&self, repo_path: &Path, ours: &str, theirs: &str) -> Result<(bool, Option<String>, Vec<String>), VmBackendError>;
+    async fn checkout(&self, repo_path: &Path, ref_name: &str) -> Result<(), VmBackendError>;
+    async fn commit(&self, repo_path: &Path, tree: &str, parents: &[String], message: &str) -> Result<String, VmBackendError>;
+    async fn bundle_create(&self, session: &str, repo: &str) -> Result<String, VmBackendError>;
+    async fn bundle_fetch(&self, repo_path: &Path, bundle_path: &str) -> Result<String, VmBackendError>;
+    async fn run_container(&self, image: &str, script: &str, mounts: &[Mount]) -> Result<(i64, String), VmBackendError>;
+    async fn agent_run(&self, task: &super::AgentTask, context: &str, mounts: &[Mount]) -> Result<(bool, Option<String>, Option<String>), VmBackendError>;
+    async fn interactive_session(&self, prompt: Option<&str>, mounts: &[Mount]) -> Result<i64, VmBackendError>;
+    async fn prompt_user(&self, message: &str) -> Result<bool, VmBackendError>;
 }
 
 // ============================================================================
@@ -192,7 +192,7 @@ impl MockBackend {
 }
 
 impl VmBackend for MockBackend {
-    fn ref_read(&self, repo_path: &Path, ref_name: &str) -> Result<Option<String>, VmBackendError> {
+    async fn ref_read(&self, repo_path: &Path, ref_name: &str) -> Result<Option<String>, VmBackendError> {
         let call = RecordedCall::RefRead { repo_path: repo_path.into(), ref_name: ref_name.into() };
         match self.dispatch(call) {
             Some(MockResult::Hash(h)) => Ok(Some(h)),
@@ -201,7 +201,7 @@ impl VmBackend for MockBackend {
         }
     }
 
-    fn ref_write(&self, repo_path: &Path, ref_name: &str, hash: &str) -> Result<(), VmBackendError> {
+    async fn ref_write(&self, repo_path: &Path, ref_name: &str, hash: &str) -> Result<(), VmBackendError> {
         let call = RecordedCall::RefWrite { repo_path: repo_path.into(), ref_name: ref_name.into(), hash: hash.into() };
         match self.dispatch(call) {
             Some(MockResult::Error(e)) => Err(VmBackendError::Failed(e)),
@@ -209,7 +209,7 @@ impl VmBackend for MockBackend {
         }
     }
 
-    fn tree_compare(&self, repo_path: &Path, a: &str, b: &str) -> Result<(bool, u32), VmBackendError> {
+    async fn tree_compare(&self, repo_path: &Path, a: &str, b: &str) -> Result<(bool, u32), VmBackendError> {
         let call = RecordedCall::TreeCompare { repo_path: repo_path.into(), a: a.into(), b: b.into() };
         match self.dispatch(call) {
             Some(MockResult::Comparison(identical, files)) => Ok((identical, files)),
@@ -218,7 +218,7 @@ impl VmBackend for MockBackend {
         }
     }
 
-    fn ancestry_check(&self, repo_path: &Path, a: &str, b: &str) -> Result<super::AncestryResult, VmBackendError> {
+    async fn ancestry_check(&self, repo_path: &Path, a: &str, b: &str) -> Result<super::AncestryResult, VmBackendError> {
         let call = RecordedCall::AncestryCheck { repo_path: repo_path.into(), a: a.into(), b: b.into() };
         match self.dispatch(call) {
             Some(MockResult::Ancestry(r)) => Ok(r),
@@ -227,7 +227,7 @@ impl VmBackend for MockBackend {
         }
     }
 
-    fn merge_trees(&self, repo_path: &Path, ours: &str, theirs: &str) -> Result<(bool, Option<String>, Vec<String>), VmBackendError> {
+    async fn merge_trees(&self, repo_path: &Path, ours: &str, theirs: &str) -> Result<(bool, Option<String>, Vec<String>), VmBackendError> {
         let call = RecordedCall::MergeTrees { repo_path: repo_path.into(), ours: ours.into(), theirs: theirs.into() };
         match self.dispatch(call) {
             Some(MockResult::MergeClean(tree)) => Ok((true, Some(tree), vec![])),
@@ -237,7 +237,7 @@ impl VmBackend for MockBackend {
         }
     }
 
-    fn checkout(&self, repo_path: &Path, ref_name: &str) -> Result<(), VmBackendError> {
+    async fn checkout(&self, repo_path: &Path, ref_name: &str) -> Result<(), VmBackendError> {
         let call = RecordedCall::Checkout { repo_path: repo_path.into(), ref_name: ref_name.into() };
         match self.dispatch(call) {
             Some(MockResult::Error(e)) => Err(VmBackendError::Failed(e)),
@@ -245,7 +245,7 @@ impl VmBackend for MockBackend {
         }
     }
 
-    fn commit(&self, repo_path: &Path, tree: &str, parents: &[String], msg: &str) -> Result<String, VmBackendError> {
+    async fn commit(&self, repo_path: &Path, tree: &str, parents: &[String], msg: &str) -> Result<String, VmBackendError> {
         let call = RecordedCall::Commit { repo_path: repo_path.into(), tree: tree.into(), parents: parents.to_vec(), message: msg.into() };
         match self.dispatch(call) {
             Some(MockResult::Hash(h)) => Ok(h),
@@ -254,7 +254,7 @@ impl VmBackend for MockBackend {
         }
     }
 
-    fn bundle_create(&self, session: &str, repo: &str) -> Result<String, VmBackendError> {
+    async fn bundle_create(&self, session: &str, repo: &str) -> Result<String, VmBackendError> {
         let call = RecordedCall::BundleCreate { session: session.into(), repo: repo.into() };
         match self.dispatch(call) {
             Some(MockResult::Hash(h)) => Ok(h),
@@ -263,7 +263,7 @@ impl VmBackend for MockBackend {
         }
     }
 
-    fn bundle_fetch(&self, repo_path: &Path, bundle: &str) -> Result<String, VmBackendError> {
+    async fn bundle_fetch(&self, repo_path: &Path, bundle: &str) -> Result<String, VmBackendError> {
         let call = RecordedCall::BundleFetch { repo_path: repo_path.into(), bundle_path: bundle.into() };
         match self.dispatch(call) {
             Some(MockResult::Hash(h)) => Ok(h),
@@ -272,7 +272,7 @@ impl VmBackend for MockBackend {
         }
     }
 
-    fn run_container(&self, image: &str, _script: &str, _mounts: &[Mount]) -> Result<(i64, String), VmBackendError> {
+    async fn run_container(&self, image: &str, _script: &str, _mounts: &[Mount]) -> Result<(i64, String), VmBackendError> {
         let call = RecordedCall::RunContainer { image: image.into() };
         match self.dispatch(call) {
             Some(MockResult::ContainerOutput(code, out)) => Ok((code, out)),
@@ -281,7 +281,7 @@ impl VmBackend for MockBackend {
         }
     }
 
-    fn agent_run(&self, task: &super::AgentTask, _context: &str, _mounts: &[Mount]) -> Result<(bool, Option<String>, Option<String>), VmBackendError> {
+    async fn agent_run(&self, task: &super::AgentTask, _context: &str, _mounts: &[Mount]) -> Result<(bool, Option<String>, Option<String>), VmBackendError> {
         let call = RecordedCall::AgentRun { task_debug: format!("{:?}", task) };
         match self.dispatch(call) {
             Some(MockResult::Hash(h)) => Ok((true, Some("resolved".into()), Some(h))),
@@ -291,7 +291,7 @@ impl VmBackend for MockBackend {
         }
     }
 
-    fn interactive_session(&self, prompt: Option<&str>, _mounts: &[Mount]) -> Result<i64, VmBackendError> {
+    async fn interactive_session(&self, prompt: Option<&str>, _mounts: &[Mount]) -> Result<i64, VmBackendError> {
         let call = RecordedCall::InteractiveSession { prompt: prompt.map(|s| s.into()) };
         match self.dispatch(call) {
             Some(MockResult::ContainerExited(code)) => Ok(code),
@@ -300,7 +300,7 @@ impl VmBackend for MockBackend {
         }
     }
 
-    fn prompt_user(&self, message: &str) -> Result<bool, VmBackendError> {
+    async fn prompt_user(&self, message: &str) -> Result<bool, VmBackendError> {
         let call = RecordedCall::PromptUser { message: message.into() };
         match self.dispatch(call) {
             Some(MockResult::Bool(b)) => Ok(b),

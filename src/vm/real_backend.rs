@@ -24,7 +24,7 @@ impl RealBackend {
 }
 
 impl VmBackend for RealBackend {
-    fn ref_read(&self, repo_path: &Path, ref_name: &str) -> Result<Option<String>, VmBackendError> {
+    async fn ref_read(&self, repo_path: &Path, ref_name: &str) -> Result<Option<String>, VmBackendError> {
         let repo = Repository::open(repo_path)
             .map_err(|e| VmBackendError::Failed(e.to_string()))?;
         let reference = match repo.find_reference(ref_name) {
@@ -36,7 +36,7 @@ impl VmBackend for RealBackend {
         Ok(Some(commit.id().to_string()))
     }
 
-    fn ref_write(&self, repo_path: &Path, ref_name: &str, hash: &str) -> Result<(), VmBackendError> {
+    async fn ref_write(&self, repo_path: &Path, ref_name: &str, hash: &str) -> Result<(), VmBackendError> {
         let repo = Repository::open(repo_path)
             .map_err(|e| VmBackendError::Failed(e.to_string()))?;
         let oid = git2::Oid::from_str(hash)
@@ -46,7 +46,7 @@ impl VmBackend for RealBackend {
         Ok(())
     }
 
-    fn tree_compare(&self, repo_path: &Path, a: &str, b: &str) -> Result<(bool, u32), VmBackendError> {
+    async fn tree_compare(&self, repo_path: &Path, a: &str, b: &str) -> Result<(bool, u32), VmBackendError> {
         let repo = Repository::open(repo_path)
             .map_err(|e| VmBackendError::Failed(e.to_string()))?;
         let oid_a = git2::Oid::from_str(a).map_err(|e| VmBackendError::Failed(e.to_string()))?;
@@ -66,7 +66,7 @@ impl VmBackend for RealBackend {
         }
     }
 
-    fn ancestry_check(&self, repo_path: &Path, a: &str, b: &str) -> Result<AncestryResult, VmBackendError> {
+    async fn ancestry_check(&self, repo_path: &Path, a: &str, b: &str) -> Result<AncestryResult, VmBackendError> {
         // Delegate to engine's check_ancestry which returns our Ancestry type
         let crate_ancestry = self.engine.check_ancestry(repo_path,
             &crate::types::CommitHash::new(a), &crate::types::CommitHash::new(b));
@@ -86,7 +86,7 @@ impl VmBackend for RealBackend {
         })
     }
 
-    fn merge_trees(&self, repo_path: &Path, ours: &str, theirs: &str) -> Result<(bool, Option<String>, Vec<String>), VmBackendError> {
+    async fn merge_trees(&self, repo_path: &Path, ours: &str, theirs: &str) -> Result<(bool, Option<String>, Vec<String>), VmBackendError> {
         // Use engine's trial_merge for in-memory merge
         let result = self.engine.trial_merge(
             repo_path,
@@ -118,7 +118,7 @@ impl VmBackend for RealBackend {
         }
     }
 
-    fn checkout(&self, repo_path: &Path, ref_name: &str) -> Result<(), VmBackendError> {
+    async fn checkout(&self, repo_path: &Path, ref_name: &str) -> Result<(), VmBackendError> {
         let repo = Repository::open(repo_path)
             .map_err(|e| VmBackendError::Failed(e.to_string()))?;
         repo.set_head(ref_name)
@@ -128,7 +128,7 @@ impl VmBackend for RealBackend {
         Ok(())
     }
 
-    fn commit(&self, repo_path: &Path, tree: &str, parents: &[String], message: &str) -> Result<String, VmBackendError> {
+    async fn commit(&self, repo_path: &Path, tree: &str, parents: &[String], message: &str) -> Result<String, VmBackendError> {
         let repo = Repository::open(repo_path)
             .map_err(|e| VmBackendError::Failed(e.to_string()))?;
         let tree_oid = git2::Oid::from_str(tree)
@@ -153,29 +153,29 @@ impl VmBackend for RealBackend {
         Ok(oid.to_string())
     }
 
-    fn bundle_create(&self, _session: &str, _repo: &str) -> Result<String, VmBackendError> {
+    async fn bundle_create(&self, _session: &str, _repo: &str) -> Result<String, VmBackendError> {
         // This would call engine.extract() internals — needs async + Docker
         // For now, return error. Full impl requires async VmBackend trait.
         Err(VmBackendError::Failed("bundle_create requires async runtime (not yet wired)".into()))
     }
 
-    fn bundle_fetch(&self, _repo_path: &Path, _bundle_path: &str) -> Result<String, VmBackendError> {
+    async fn bundle_fetch(&self, _repo_path: &Path, _bundle_path: &str) -> Result<String, VmBackendError> {
         Err(VmBackendError::Failed("bundle_fetch requires async runtime (not yet wired)".into()))
     }
 
-    fn run_container(&self, _image: &str, _script: &str, _mounts: &[Mount]) -> Result<(i64, String), VmBackendError> {
+    async fn run_container(&self, _image: &str, _script: &str, _mounts: &[Mount]) -> Result<(i64, String), VmBackendError> {
         Err(VmBackendError::Failed("run_container requires async runtime (not yet wired)".into()))
     }
 
-    fn agent_run(&self, _task: &AgentTask, _context: &str, _mounts: &[Mount]) -> Result<(bool, Option<String>, Option<String>), VmBackendError> {
+    async fn agent_run(&self, _task: &AgentTask, _context: &str, _mounts: &[Mount]) -> Result<(bool, Option<String>, Option<String>), VmBackendError> {
         Err(VmBackendError::Failed("agent_run requires async runtime (not yet wired)".into()))
     }
 
-    fn interactive_session(&self, _prompt: Option<&str>, _mounts: &[Mount]) -> Result<i64, VmBackendError> {
+    async fn interactive_session(&self, _prompt: Option<&str>, _mounts: &[Mount]) -> Result<i64, VmBackendError> {
         Err(VmBackendError::Failed("interactive_session requires async runtime (not yet wired)".into()))
     }
 
-    fn prompt_user(&self, message: &str) -> Result<bool, VmBackendError> {
+    async fn prompt_user(&self, message: &str) -> Result<bool, VmBackendError> {
         Ok(crate::confirm(message, false))
     }
 }

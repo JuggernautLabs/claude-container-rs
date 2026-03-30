@@ -1,9 +1,4 @@
 //! Interpreter — walks an op tree, dispatches to backend, updates VM state.
-//!
-//! The interpreter is a recursive tree walker. Primitives dispatch to the
-//! backend directly. Compound ops (TryMerge, AgentRun, InteractiveSession)
-//! dispatch their inner op, check the result, and follow the appropriate
-//! branch (on_clean/on_conflict/on_error, on_success/on_failure, on_exit).
 
 use std::path::Path;
 use super::state::*;
@@ -49,29 +44,27 @@ impl ProgramResult {
 }
 
 impl SyncVM {
-    /// Run a program (list of ops) against a backend.
-    /// Walks the op tree recursively. Stops on unrecoverable error or user decline.
-    pub fn run(&mut self, backend: &dyn VmBackend, ops: Vec<Op>) -> ProgramResult {
+    /// Run a program against a backend.
+    pub async fn run<B: VmBackend>(&mut self, backend: &B, ops: Vec<Op>) -> ProgramResult {
         let mut result = ProgramResult {
             outcomes: Vec::new(),
             halted: false,
             halt_reason: None,
         };
-        self.run_ops(backend, &ops, &mut result);
+        self.run_ops(backend, &ops, &mut result).await;
         result
     }
 
-    /// Recursive inner loop.
-    fn run_ops(&mut self, backend: &dyn VmBackend, ops: &[Op], result: &mut ProgramResult) {
-        for op in ops {
-            if result.halted { return; }
-            self.run_one(backend, op, result);
-        }
+    fn run_ops<'a, B: VmBackend>(&'a mut self, backend: &'a B, ops: &'a [Op], result: &'a mut ProgramResult) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
+        Box::pin(async move {
+            for op in ops {
+                if result.halted { return; }
+                self.run_one(backend, op, result).await;
+            }
+        })
     }
 
-    /// Execute a single op (primitive or compound).
-    fn run_one(&mut self, backend: &dyn VmBackend, op: &Op, result: &mut ProgramResult) {
-        // Check preconditions
+    async fn run_one<B: VmBackend>(&mut self, backend: &B, op: &Op, result: &mut ProgramResult) {
         if let Err(e) = op.check_preconditions(self) {
             let reason = e.reason.clone();
             result.outcomes.push(StepOutcome {
@@ -84,41 +77,26 @@ impl SyncVM {
         }
 
         match op {
-            // ── Compound: TryMerge ──
             Op::TryMerge { repo, ours, theirs, on_clean, on_conflict, on_error } => {
-                let repo_vm = match self.repo(repo) {
-                    Some(r) => r,
-                    None => return,
-                };
-                let repo_path = match &repo_vm.host_path {
-                    Some(p) => p.clone(),
-                    None => return,
-                };
-
-                match backend.merge_trees(&repo_path, ours, theirs) {
+                let repo_path = repo_path(self, repo);
+                match backend.merge_trees(&repo_path, ours, theirs).await {
                     Ok((true, tree, _)) => {
-                        // Clean merge
-                        let op_result = OpResult::MergeResult {
-                            clean: true, tree, conflicts: vec![],
-                        };
+                        let op_result = OpResult::MergeResult { clean: true, tree, conflicts: vec![] };
                         self.record(op.clone(), OpOutcome::Ok);
                         result.outcomes.push(StepOutcome {
                             op_description: format!("TryMerge({}, clean)", repo),
                             result: StepResult::Ok(op_result),
                         });
-                        self.run_ops(backend, on_clean, result);
+                        self.run_ops(backend, on_clean, result).await;
                     }
                     Ok((false, _, conflicts)) => {
-                        // Conflict
-                        let op_result = OpResult::MergeResult {
-                            clean: false, tree: None, conflicts: conflicts.clone(),
-                        };
+                        let op_result = OpResult::MergeResult { clean: false, tree: None, conflicts: conflicts.clone() };
                         self.record(op.clone(), OpOutcome::Conflict(conflicts));
                         result.outcomes.push(StepOutcome {
                             op_description: format!("TryMerge({}, conflict)", repo),
                             result: StepResult::Ok(op_result),
                         });
-                        self.run_ops(backend, on_conflict, result);
+                        self.run_ops(backend, on_conflict, result).await;
                     }
                     Err(e) => {
                         self.record(op.clone(), OpOutcome::Failed(e.to_string()));
@@ -126,35 +104,31 @@ impl SyncVM {
                             op_description: format!("TryMerge({}, error)", repo),
                             result: StepResult::BackendError(e.to_string()),
                         });
-                        self.run_ops(backend, on_error, result);
+                        self.run_ops(backend, on_error, result).await;
                     }
                 }
             }
 
-            // ── Compound: AgentRun ──
             Op::AgentRun { repo, task, context, on_success, on_failure } => {
-                let mounts = self.agent_mounts(repo);
-                match backend.agent_run(task, context, &mounts) {
+                let mounts = vec![];
+                match backend.agent_run(task, context, &mounts).await {
                     Ok((resolved, description, new_head)) => {
-                        let op_result = OpResult::AgentCompleted {
-                            resolved, description, new_head: new_head.clone(),
-                        };
+                        let op_result = OpResult::AgentCompleted { resolved, description, new_head: new_head.clone() };
                         op.apply_postconditions(self, &op_result);
-
                         if resolved {
                             self.record(op.clone(), OpOutcome::Ok);
                             result.outcomes.push(StepOutcome {
                                 op_description: format!("AgentRun({}, resolved)", repo),
                                 result: StepResult::Ok(op_result),
                             });
-                            self.run_ops(backend, on_success, result);
+                            self.run_ops(backend, on_success, result).await;
                         } else {
                             self.record(op.clone(), OpOutcome::Failed("agent did not resolve".into()));
                             result.outcomes.push(StepOutcome {
                                 op_description: format!("AgentRun({}, unresolved)", repo),
                                 result: StepResult::Ok(op_result),
                             });
-                            self.run_ops(backend, on_failure, result);
+                            self.run_ops(backend, on_failure, result).await;
                         }
                     }
                     Err(e) => {
@@ -163,15 +137,14 @@ impl SyncVM {
                             op_description: format!("AgentRun({}, error)", repo),
                             result: StepResult::BackendError(e.to_string()),
                         });
-                        self.run_ops(backend, on_failure, result);
+                        self.run_ops(backend, on_failure, result).await;
                     }
                 }
             }
 
-            // ── Compound: InteractiveSession ──
             Op::InteractiveSession { prompt, on_exit } => {
-                let mounts = vec![]; // TODO: build from VM state
-                match backend.interactive_session(prompt.as_deref(), &mounts) {
+                let mounts = vec![];
+                match backend.interactive_session(prompt.as_deref(), &mounts).await {
                     Ok(exit_code) => {
                         let op_result = OpResult::SessionExited { exit_code };
                         op.apply_postconditions(self, &op_result);
@@ -180,7 +153,7 @@ impl SyncVM {
                             op_description: "InteractiveSession".into(),
                             result: StepResult::Ok(op_result),
                         });
-                        self.run_ops(backend, on_exit, result);
+                        self.run_ops(backend, on_exit, result).await;
                     }
                     Err(e) => {
                         self.record(op.clone(), OpOutcome::Failed(e.to_string()));
@@ -188,14 +161,13 @@ impl SyncVM {
                             op_description: "InteractiveSession".into(),
                             result: StepResult::BackendError(e.to_string()),
                         });
-                        self.run_ops(backend, on_exit, result);
+                        self.run_ops(backend, on_exit, result).await;
                     }
                 }
             }
 
-            // ── Confirm ──
             Op::Confirm { message } => {
-                match backend.prompt_user(message) {
+                match backend.prompt_user(message).await {
                     Ok(true) => {
                         self.record(op.clone(), OpOutcome::Ok);
                         result.outcomes.push(StepOutcome {
@@ -223,9 +195,8 @@ impl SyncVM {
                 }
             }
 
-            // ── All primitives ──
             primitive => {
-                let dispatch_result = dispatch_primitive(backend, self, primitive);
+                let dispatch_result = dispatch_primitive(backend, self, primitive).await;
                 match dispatch_result {
                     Ok(op_result) => {
                         primitive.apply_postconditions(self, &op_result);
@@ -248,99 +219,74 @@ impl SyncVM {
             }
         }
     }
-
-    /// Build mount list for agent ops from VM state.
-    fn agent_mounts(&self, _repo: &str) -> Vec<Mount> {
-        // TODO: build actual mounts from session volumes + host paths
-        vec![]
-    }
 }
 
-/// Dispatch a primitive op to the backend.
-fn dispatch_primitive(
-    backend: &dyn VmBackend,
+async fn dispatch_primitive<B: VmBackend>(
+    backend: &B,
     vm: &SyncVM,
     op: &Op,
 ) -> Result<OpResult, VmBackendError> {
     match op {
         Op::RefRead { repo, ref_name, .. } => {
             let path = repo_path(vm, repo);
-            match backend.ref_read(&path, ref_name)? {
+            match backend.ref_read(&path, ref_name).await? {
                 Some(h) => Ok(OpResult::Hash(h)),
                 None => Ok(OpResult::Hash(String::new())),
             }
         }
         Op::RefWrite { repo, ref_name, hash, .. } => {
             let path = repo_path(vm, repo);
-            backend.ref_write(&path, ref_name, hash)?;
+            backend.ref_write(&path, ref_name, hash).await?;
             Ok(OpResult::Unit)
         }
         Op::TreeCompare { repo, a, b } => {
             let path = repo_path(vm, repo);
-            let (identical, files) = backend.tree_compare(&path, a, b)?;
+            let (identical, files) = backend.tree_compare(&path, a, b).await?;
             Ok(OpResult::Comparison { identical, files_changed: files })
         }
         Op::AncestryCheck { repo, a, b } => {
             let path = repo_path(vm, repo);
-            let ancestry = backend.ancestry_check(&path, a, b)?;
+            let ancestry = backend.ancestry_check(&path, a, b).await?;
             Ok(OpResult::Ancestry(ancestry))
         }
         Op::MergeTrees { repo, ours, theirs } => {
             let path = repo_path(vm, repo);
-            let (clean, tree, conflicts) = backend.merge_trees(&path, ours, theirs)?;
+            let (clean, tree, conflicts) = backend.merge_trees(&path, ours, theirs).await?;
             Ok(OpResult::MergeResult { clean, tree, conflicts })
         }
         Op::Checkout { repo, ref_name, .. } => {
             let path = repo_path(vm, repo);
-            backend.checkout(&path, ref_name)?;
+            backend.checkout(&path, ref_name).await?;
             Ok(OpResult::Unit)
         }
         Op::Commit { repo, tree, parents, message } => {
             let path = repo_path(vm, repo);
-            let hash = backend.commit(&path, tree, parents, message)?;
+            let hash = backend.commit(&path, tree, parents, message).await?;
             Ok(OpResult::Hash(hash))
         }
         Op::BundleCreate { repo } => {
-            let bundle_path = backend.bundle_create(&vm.session_name, repo)?;
+            let bundle_path = backend.bundle_create(&vm.session_name, repo).await?;
             Ok(OpResult::Hash(bundle_path))
         }
         Op::BundleFetch { repo, bundle_path } => {
             let path = repo_path(vm, repo);
-            let hash = backend.bundle_fetch(&path, bundle_path)?;
+            let hash = backend.bundle_fetch(&path, bundle_path).await?;
             Ok(OpResult::Hash(hash))
         }
         Op::RunContainer { image, script, mounts } => {
-            let (exit_code, stdout) = backend.run_container(image, script, mounts)?;
+            let (exit_code, stdout) = backend.run_container(image, script, mounts).await?;
             Ok(OpResult::ContainerOutput { exit_code, stdout })
         }
-        // Compounds and Confirm handled by run_one, not here
         _ => Ok(OpResult::Unit),
     }
 }
 
-/// Get the host path for a repo from VM state.
 fn repo_path(vm: &SyncVM, repo: &str) -> std::path::PathBuf {
     vm.repo(repo)
         .and_then(|r| r.host_path.clone())
         .unwrap_or_else(|| std::path::PathBuf::from(format!("/unknown/{}", repo)))
 }
 
-/// Human-readable op name for trace/results.
 fn op_name(op: &Op) -> String {
-    match op {
-        Op::RefRead { repo, ref_name, .. } => format!("RefRead({}, {})", repo, ref_name),
-        Op::RefWrite { repo, ref_name, .. } => format!("RefWrite({}, {})", repo, ref_name),
-        Op::TreeCompare { repo, .. } => format!("TreeCompare({})", repo),
-        Op::AncestryCheck { repo, .. } => format!("AncestryCheck({})", repo),
-        Op::MergeTrees { repo, .. } => format!("MergeTrees({})", repo),
-        Op::Checkout { repo, .. } => format!("Checkout({})", repo),
-        Op::Commit { repo, .. } => format!("Commit({})", repo),
-        Op::BundleCreate { repo } => format!("BundleCreate({})", repo),
-        Op::BundleFetch { repo, .. } => format!("BundleFetch({})", repo),
-        Op::RunContainer { .. } => "RunContainer".into(),
-        Op::TryMerge { repo, .. } => format!("TryMerge({})", repo),
-        Op::AgentRun { repo, .. } => format!("AgentRun({})", repo),
-        Op::InteractiveSession { .. } => "InteractiveSession".into(),
-        Op::Confirm { message } => format!("Confirm({})", message),
-    }
+    format!("{}", op)
 }
