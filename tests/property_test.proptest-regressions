@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 3843b2ab96044e6de7f8ff48e13be8010fa4d6662e206ea1ddd00de1afc8267d # shrinks to repo_vm = RepoVM { container: Absent, session: At("00a000a"), target: At("0a0aaaa"), container_clean: false, host_clean: true, host_merge_state: Clean, conflict: Clean, host_path: Some("/tmp/fuzz") }

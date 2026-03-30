@@ -271,10 +271,10 @@ pub fn repo_push_action(repo: &RepoVM, target_branch: &str) -> PushIntent {
     match (&repo.container, &repo.session, &repo.target) {
         // No container → push to container (clone)
         (RefState::Absent, _, RefState::At(_)) => PushIntent::Clone,
-        // Target ahead of session → inject
-        (_, RefState::At(s), RefState::At(t)) if s != t => {
-            // Simplified: if target differs from session, inject
-            // Real logic would check ancestry
+        // Container matches session (extraction done), target differs → inject
+        // This means the container is in sync with session, but target has
+        // different work. Push injects target into container.
+        (RefState::At(c), RefState::At(s), RefState::At(t)) if c == s && t != s => {
             PushIntent::Inject
         }
         _ => PushIntent::Skip,
