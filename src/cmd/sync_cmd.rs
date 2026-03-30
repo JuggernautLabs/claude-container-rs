@@ -18,13 +18,21 @@ pub(crate) async fn cmd_sync(name: &SessionName, branch: &str, filter: Option<&s
     let (lc, engine, plan, repo_paths) = build_sync_plan(name, branch, filter, include_deps).await?;
 
     // VM planning
-    let vm = build_vm_from_plan(name, branch, &plan.action, &repo_paths);
+    let mut vm = build_vm_from_plan(name, branch, &plan.action, &repo_paths);
     let sync_ops = git_sandbox::vm::programs::plan_sync(&vm);
     let has_work = !sync_ops.is_empty();
 
     render::sync_plan_directed(&plan.action, "sync");
 
-    if dry_run || !has_work {
+    if dry_run {
+        if !sync_ops.is_empty() {
+            eprintln!("\nProgram ({} ops):", sync_ops.len());
+            eprint!("{}", git_sandbox::vm::display::render_program(&sync_ops, 2));
+        }
+        return Ok(());
+    }
+
+    if !has_work {
         return Ok(());
     }
 
@@ -33,13 +41,39 @@ pub(crate) async fn cmd_sync(name: &SessionName, branch: &str, filter: Option<&s
         return Ok(());
     }
 
+    // Execute via VM interpreter
     eprintln!();
-    let result = engine.execute_sync(name, plan.action, &repo_paths).await?;
-    render::sync_result(&result);
+    let backend = git_sandbox::vm::RealBackend::from_docker(lc.docker_client().clone(), name.as_str());
+    let result = vm.run(&backend, sync_ops).await;
 
-    let conflicts = collect_conflicts(&result, &repo_paths);
-    if !conflicts.is_empty() {
-        offer_reconciliation(&lc, name, &conflicts, branch).await?;
+    // Render results
+    for outcome in &result.outcomes {
+        if outcome.result.is_ok() {
+            eprintln!("  {} {}", colored::Colorize::green("✓"), outcome.op_description);
+        } else {
+            match &outcome.result {
+                git_sandbox::vm::StepResult::BackendError(e) => {
+                    eprintln!("  {} {} — {}", colored::Colorize::red("✗"), outcome.op_description, e);
+                }
+                _ => {
+                    eprintln!("  {} {}", colored::Colorize::red("✗"), outcome.op_description);
+                }
+            }
+        }
+    }
+
+    if result.halted {
+        eprintln!("  {} Sync halted: {}", colored::Colorize::red("✗"),
+            result.halt_reason.as_deref().unwrap_or("unknown"));
+    }
+
+    let succeeded = result.succeeded();
+    let failed = result.failed();
+    eprintln!();
+    if failed == 0 {
+        eprintln!("  {} {} op(s) succeeded", colored::Colorize::green("✓"), succeeded);
+    } else {
+        eprintln!("  {} {} succeeded, {} failed", colored::Colorize::yellow("⚠"), succeeded, failed);
     }
 
     Ok(())
