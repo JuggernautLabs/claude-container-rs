@@ -18,6 +18,8 @@ pub mod git2_backend;
 pub mod real_backend;
 pub mod programs;
 pub mod display;
+pub mod plan;
+pub mod staging;
 
 pub use state::*;
 pub use ops::*;
@@ -25,5 +27,7 @@ pub use backend::*;
 pub use interpreter::*;
 pub use git2_backend::Git2Backend;
 pub use real_backend::RealBackend;
+pub use plan::*;
+pub use staging::StagingBackend;
 pub use programs::*;
 pub use display::render_program;

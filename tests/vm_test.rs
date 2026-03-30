@@ -1325,3 +1325,166 @@ async fn render_program_shows_compound_branches() {
     assert!(output.contains("on clean:"));
     assert!(output.contains("on error:"));
 }
+
+// ============================================================================
+// StagingBackend tests — transactional execution against real repos
+// ============================================================================
+
+#[tokio::test]
+async fn staging_ref_write_doesnt_modify_real_branch() {
+    let (_tmp, path) = make_repo("staging-rw");
+    commit_file(&path, "a.txt", "a", "c1");
+    let main_before = head_of(&path, "main");
+
+    // Create a commit on a side branch (doesn't move main)
+    git_branch(&path, "side");
+    git_switch(&path, "side");
+    let new_hash = commit_file(&path, "b.txt", "b", "c2");
+    git_switch(&path, "main");
+    assert_eq!(head_of(&path, "main"), main_before, "setup: main didn't move");
+
+    let inner = Git2Backend::new();
+    let staging = StagingBackend::new(inner);
+
+    // Stage a write of the side branch hash to main
+    staging.ref_write(&path, "refs/heads/main", &new_hash).await.unwrap();
+
+    // Real main is UNCHANGED
+    assert_eq!(head_of(&path, "main"), main_before, "staging should not modify real ref");
+
+    // Staging recorded it
+    let staged = staging.staged();
+    assert_eq!(staged.len(), 1);
+    assert_eq!(staged[0].real_ref, "refs/heads/main");
+    assert_eq!(staged[0].new_hash, new_hash);
+
+    // But ref_read through staging returns the STAGED value
+    let read = staging.ref_read(&path, "refs/heads/main").await.unwrap();
+    assert_eq!(read, Some(new_hash.clone()), "staging read should return staged value");
+}
+
+#[tokio::test]
+async fn staging_apply_promotes_to_real_ref() {
+    let (_tmp, path) = make_repo("staging-apply");
+    let main_before = head_of(&path, "main");
+    commit_file(&path, "a.txt", "a", "c1");
+    let new_hash = head_of(&path, "main");
+
+    // Reset main back to original
+    {
+        let repo = git2::Repository::open(&path).unwrap();
+        let oid = git2::Oid::from_str(&main_before).unwrap();
+        repo.reference("refs/heads/main", oid, true, "reset").unwrap();
+    }
+    assert_eq!(head_of(&path, "main"), main_before);
+
+    let inner = Git2Backend::new();
+    let staging = StagingBackend::new(inner);
+
+    // Stage a write to main
+    staging.ref_write(&path, "refs/heads/main", &new_hash).await.unwrap();
+    assert_eq!(head_of(&path, "main"), main_before, "still unchanged before apply");
+
+    // Apply
+    staging.apply().unwrap();
+    assert_eq!(head_of(&path, "main"), new_hash, "main should advance after apply");
+}
+
+#[tokio::test]
+async fn staging_discard_cleans_up() {
+    let (_tmp, path) = make_repo("staging-discard");
+    let main_before = head_of(&path, "main");
+    commit_file(&path, "a.txt", "a", "c1");
+    let new_hash = head_of(&path, "main");
+
+    // Reset main back
+    {
+        let repo = git2::Repository::open(&path).unwrap();
+        let oid = git2::Oid::from_str(&main_before).unwrap();
+        repo.reference("refs/heads/main", oid, true, "reset").unwrap();
+    }
+
+    let inner = Git2Backend::new();
+    let staging = StagingBackend::new(inner);
+
+    staging.ref_write(&path, "refs/heads/main", &new_hash).await.unwrap();
+    assert!(!staging.staged().is_empty());
+
+    // Discard
+    staging.discard();
+    assert!(staging.staged().is_empty());
+    assert_eq!(head_of(&path, "main"), main_before, "main unchanged after discard");
+}
+
+#[tokio::test]
+async fn staging_merge_creates_real_objects_but_doesnt_move_ref() {
+    let (_tmp, path) = make_repo("staging-merge");
+    git_branch(&path, "session");
+    git_switch(&path, "session");
+    commit_file(&path, "feature.txt", "feature", "add feature");
+    let session_h = head_of(&path, "session");
+    git_switch(&path, "main");
+    let main_h = head_of(&path, "main");
+
+    let inner = Git2Backend::new();
+    let staging = StagingBackend::new(inner);
+
+    // Merge trees — creates real git objects (immutable, harmless)
+    let (clean, tree_opt, _) = staging.merge_trees(&path, &main_h, &session_h).await.unwrap();
+    assert!(clean);
+    let tree_hash = tree_opt.unwrap();
+
+    // Commit — creates real commit object
+    let new_commit = staging.commit(&path, &tree_hash, &[main_h.clone()], "staged merge").await.unwrap();
+
+    // Stage the ref write
+    staging.ref_write(&path, "refs/heads/main", &new_commit).await.unwrap();
+
+    // Main STILL hasn't moved
+    assert_eq!(head_of(&path, "main"), main_h, "main unchanged before apply");
+
+    // But the commit object exists
+    let repo = git2::Repository::open(&path).unwrap();
+    let oid = git2::Oid::from_str(&new_commit).unwrap();
+    assert!(repo.find_commit(oid).is_ok(), "commit object should exist");
+
+    // Apply — NOW main moves
+    staging.apply().unwrap();
+    assert_eq!(head_of(&path, "main"), new_commit, "main should advance after apply");
+    assert_no_markers(&path, "main");
+}
+
+#[tokio::test]
+async fn staging_full_pull_program_then_apply() {
+    let (_tmp, path) = make_repo("staging-pull");
+    git_branch(&path, "session");
+    git_switch(&path, "session");
+    commit_file(&path, "work.txt", "agent work", "agent commit");
+    let session_h = head_of(&path, "session");
+    git_switch(&path, "main");
+    let main_h = head_of(&path, "main");
+
+    let inner = Git2Backend::new();
+    let staging = StagingBackend::new(inner);
+
+    // Run a merge program through staging
+    let (clean, tree, _) = staging.merge_trees(&path, &main_h, &session_h).await.unwrap();
+    assert!(clean);
+    let tree_hash = tree.unwrap();
+    let new_commit = staging.commit(&path, &tree_hash, &[main_h.clone()], "squash merge").await.unwrap();
+    staging.ref_write(&path, "refs/heads/main", &new_commit).await.unwrap();
+
+    // Preview: main hasn't moved, but we know what it WOULD be
+    let staged = staging.staged();
+    assert_eq!(staged.len(), 1);
+    assert_eq!(head_of(&path, "main"), main_h, "preview: main unchanged");
+    eprintln!("Preview: main would move from {} to {}", &main_h[..7], &new_commit[..7]);
+
+    // Apply
+    staging.apply().unwrap();
+    assert_eq!(head_of(&path, "main"), new_commit, "main advanced after apply");
+
+    // Verify content
+    assert!(tree_has_file(&path, "main", "work.txt"), "agent work should be on main");
+    assert_no_markers(&path, "main");
+}
