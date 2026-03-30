@@ -12,7 +12,9 @@
 pub mod state;
 pub mod ops;
 pub mod backend;
+pub mod interpreter;
 
 pub use state::*;
 pub use ops::*;
 pub use backend::*;
+pub use interpreter::*;
