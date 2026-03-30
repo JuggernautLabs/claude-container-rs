@@ -49,3 +49,6 @@ base64 = "0.22"
 signal-hook = "0.3"
 signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
 ctrlc = "3"
+
+[dev-dependencies]
+proptest = "1"

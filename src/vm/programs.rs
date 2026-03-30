@@ -288,15 +288,18 @@ pub fn repo_pull_action(repo: &RepoVM) -> PullIntent {
     }
 
     match (&repo.container, &repo.session, &repo.target) {
+        // No container — nothing to extract
+        (RefState::Absent, _, _) => PullIntent::Skip,
         // Container has work session doesn't
         (RefState::At(c), RefState::At(s), _) if c != s => PullIntent::Extract,
-        (RefState::At(c), RefState::Absent, _) => PullIntent::CloneToHost,
+        (RefState::At(_), RefState::Absent, _) => PullIntent::CloneToHost,
         // Session ahead of target
-        (_, RefState::At(s), RefState::At(t)) if s != t => {
+        (RefState::At(c), RefState::At(s), RefState::At(t)) if s != t => {
             // Check if container matches session (extraction done)
-            match &repo.container {
-                RefState::At(c) if c == s => PullIntent::MergeToTarget,
-                _ => PullIntent::Extract,
+            if c == s {
+                PullIntent::MergeToTarget
+            } else {
+                PullIntent::Extract
             }
         }
         _ => PullIntent::Skip,
