@@ -266,3 +266,202 @@ impl VmBackend for MockBackend {
         }
     }
 }
+
+// ============================================================================
+// StrictMockBackend — ordered expectations, panics on mismatch
+// ============================================================================
+
+/// A strict mock that verifies calls happen in exact order with exact patterns.
+/// Panics on:
+/// - Unexpected call (no matching expectation)
+/// - Call out of order
+/// - Unconsumed expectations (checked via `assert_complete()`)
+#[derive(Debug)]
+pub struct StrictMockBackend {
+    expectations: std::sync::Mutex<Vec<Expectation>>,
+    cursor: std::sync::Mutex<usize>,
+    calls: std::sync::Mutex<Vec<String>>,
+}
+
+/// One expected call.
+#[derive(Debug, Clone)]
+pub struct Expectation {
+    /// Pattern to match against the call description
+    pub pattern: String,
+    /// Result to return
+    pub result: MockResult,
+}
+
+impl StrictMockBackend {
+    pub fn new() -> Self {
+        Self {
+            expectations: std::sync::Mutex::new(Vec::new()),
+            cursor: std::sync::Mutex::new(0),
+            calls: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Add the next expected call (order matters).
+    pub fn expect(&self, pattern: &str, result: MockResult) {
+        self.expectations.lock().unwrap().push(Expectation {
+            pattern: pattern.to_string(),
+            result,
+        });
+    }
+
+    /// Assert all expectations were consumed. Panics with details if not.
+    pub fn assert_complete(&self) {
+        let expectations = self.expectations.lock().unwrap();
+        let cursor = *self.cursor.lock().unwrap();
+        let calls = self.calls.lock().unwrap();
+        if cursor < expectations.len() {
+            let remaining: Vec<_> = expectations[cursor..].iter()
+                .map(|e| e.pattern.clone())
+                .collect();
+            panic!(
+                "StrictMock: {} unconsumed expectation(s): {:?}\nCalls made: {:?}",
+                remaining.len(), remaining, *calls,
+            );
+        }
+    }
+
+    /// Get recorded calls.
+    pub fn recorded_calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    fn next_response(&self, call: &str) -> MockResult {
+        self.calls.lock().unwrap().push(call.to_string());
+
+        let expectations = self.expectations.lock().unwrap();
+        let mut cursor = self.cursor.lock().unwrap();
+
+        if *cursor >= expectations.len() {
+            panic!(
+                "StrictMock: unexpected call '{}' (no more expectations)\nAll calls: {:?}",
+                call, self.calls.lock().unwrap(),
+            );
+        }
+
+        let expected = &expectations[*cursor];
+        if !call.contains(&expected.pattern) {
+            panic!(
+                "StrictMock: call #{} mismatch\n  expected pattern: '{}'\n  actual call:      '{}'\nAll calls so far: {:?}",
+                *cursor, expected.pattern, call, self.calls.lock().unwrap(),
+            );
+        }
+
+        let result = expected.result.clone();
+        *cursor += 1;
+        result
+    }
+}
+
+impl VmBackend for StrictMockBackend {
+    fn ref_read(&self, _repo_path: &Path, ref_name: &str) -> Result<Option<String>, VmBackendError> {
+        match self.next_response(&format!("ref_read:{}", ref_name)) {
+            MockResult::Hash(h) => Ok(Some(h)),
+            MockResult::Error(e) => Err(VmBackendError::Failed(e)),
+            _ => Ok(None),
+        }
+    }
+
+    fn ref_write(&self, _repo_path: &Path, ref_name: &str, hash: &str) -> Result<(), VmBackendError> {
+        match self.next_response(&format!("ref_write:{}={}", ref_name, hash)) {
+            MockResult::Error(e) => Err(VmBackendError::Failed(e)),
+            _ => Ok(()),
+        }
+    }
+
+    fn tree_compare(&self, _repo_path: &Path, a: &str, b: &str) -> Result<(bool, u32), VmBackendError> {
+        match self.next_response(&format!("tree_compare:{}..{}", a, b)) {
+            MockResult::Comparison(identical, files) => Ok((identical, files)),
+            MockResult::Error(e) => Err(VmBackendError::Failed(e)),
+            _ => Ok((true, 0)),
+        }
+    }
+
+    fn ancestry_check(&self, _repo_path: &Path, a: &str, b: &str) -> Result<super::AncestryResult, VmBackendError> {
+        match self.next_response(&format!("ancestry_check:{}..{}", a, b)) {
+            MockResult::Ancestry(r) => Ok(r),
+            MockResult::Error(e) => Err(VmBackendError::Failed(e)),
+            _ => Ok(super::AncestryResult::Unknown),
+        }
+    }
+
+    fn merge_trees(&self, _repo_path: &Path, ours: &str, theirs: &str) -> Result<(bool, Option<String>, Vec<String>), VmBackendError> {
+        match self.next_response(&format!("merge_trees:{}+{}", ours, theirs)) {
+            MockResult::MergeClean(tree) => Ok((true, Some(tree), vec![])),
+            MockResult::MergeConflict(files) => Ok((false, None, files)),
+            MockResult::Error(e) => Err(VmBackendError::Failed(e)),
+            _ => Ok((true, Some("mock_tree".into()), vec![])),
+        }
+    }
+
+    fn checkout(&self, _repo_path: &Path, ref_name: &str) -> Result<(), VmBackendError> {
+        match self.next_response(&format!("checkout:{}", ref_name)) {
+            MockResult::Error(e) => Err(VmBackendError::Failed(e)),
+            _ => Ok(()),
+        }
+    }
+
+    fn commit(&self, _repo_path: &Path, _tree: &str, _parents: &[String], msg: &str) -> Result<String, VmBackendError> {
+        match self.next_response(&format!("commit:{}", msg)) {
+            MockResult::Hash(h) => Ok(h),
+            MockResult::Error(e) => Err(VmBackendError::Failed(e)),
+            _ => Ok("strict_mock_commit".into()),
+        }
+    }
+
+    fn bundle_create(&self, _session: &str, repo: &str) -> Result<String, VmBackendError> {
+        match self.next_response(&format!("bundle_create:{}", repo)) {
+            MockResult::Hash(h) => Ok(h),
+            MockResult::Error(e) => Err(VmBackendError::Failed(e)),
+            _ => Ok("/tmp/strict.bundle".into()),
+        }
+    }
+
+    fn bundle_fetch(&self, _repo_path: &Path, bundle: &str) -> Result<String, VmBackendError> {
+        match self.next_response(&format!("bundle_fetch:{}", bundle)) {
+            MockResult::Hash(h) => Ok(h),
+            MockResult::Error(e) => Err(VmBackendError::Failed(e)),
+            _ => Ok("strict_fetched".into()),
+        }
+    }
+
+    fn run_container(&self, _image: &str, script: &str, _mounts: &[Mount]) -> Result<(i64, String), VmBackendError> {
+        let short = &script[..script.len().min(50)];
+        match self.next_response(&format!("run_container:{}", short)) {
+            MockResult::ContainerOutput(code, out) => Ok((code, out)),
+            MockResult::Error(e) => Err(VmBackendError::Failed(e)),
+            _ => Ok((0, String::new())),
+        }
+    }
+
+    fn agent_run(&self, task: &super::AgentTask, _context: &str, _mounts: &[Mount])
+        -> Result<(bool, Option<String>, Option<String>), VmBackendError> {
+        match self.next_response(&format!("agent_run:{:?}", task)) {
+            MockResult::Hash(h) => Ok((true, Some("resolved".into()), Some(h))),
+            MockResult::Bool(false) => Ok((false, None, None)),
+            MockResult::Error(e) => Err(VmBackendError::Failed(e)),
+            _ => Ok((true, Some("strict resolved".into()), Some("strict_head".into()))),
+        }
+    }
+
+    fn interactive_session(&self, prompt: Option<&str>, _mounts: &[Mount])
+        -> Result<i64, VmBackendError> {
+        match self.next_response(&format!("interactive_session:{}", prompt.unwrap_or("none"))) {
+            MockResult::ContainerExited(code) => Ok(code),
+            MockResult::Error(e) => Err(VmBackendError::Failed(e)),
+            _ => Ok(0),
+        }
+    }
+
+    fn prompt_user(&self, message: &str) -> Result<bool, VmBackendError> {
+        match self.next_response(&format!("prompt:{}", message)) {
+            MockResult::Bool(b) => Ok(b),
+            MockResult::Error(e) => Err(VmBackendError::Failed(e)),
+            _ => Ok(true),
+        }
+    }
+}

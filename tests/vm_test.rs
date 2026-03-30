@@ -654,3 +654,99 @@ fn interpreter_state_unchanged_on_backend_error_transactional() {
     // State unchanged — backend failed, postconditions never applied
     assert_eq!(vm.repo("alpha").unwrap().target, RefState::At("ccc".into()));
 }
+
+// ============================================================================
+// StrictMockBackend tests — ordered expectations, panics on mismatch
+// ============================================================================
+
+#[test]
+fn strict_mock_verifies_call_order() {
+    let mock = StrictMockBackend::new();
+    mock.expect("bundle_create:alpha", MockResult::Hash("/tmp/a.bundle".into()));
+    mock.expect("bundle_fetch:/tmp/a.bundle", MockResult::Hash("fetched_abc".into()));
+    mock.expect("ref_write:refs/heads/test-session", MockResult::Unit);
+
+    let mut vm = test_vm();
+    vm.set_repo("alpha", repo_with_refs("aaa", "old", "ccc"));
+
+    let result = vm.run(&mock, vec![
+        Op::bundle_create("alpha"),
+        Op::bundle_fetch("alpha", "/tmp/a.bundle"),
+        Op::ref_write(Side::Host, "alpha", "refs/heads/test-session", "fetched_abc"),
+    ]);
+
+    assert_eq!(result.succeeded(), 3);
+    mock.assert_complete(); // all expectations consumed
+}
+
+#[test]
+#[should_panic(expected = "unconsumed expectation")]
+fn strict_mock_panics_on_unconsumed() {
+    let mock = StrictMockBackend::new();
+    mock.expect("bundle_create:alpha", MockResult::Hash("/tmp/a.bundle".into()));
+    mock.expect("bundle_fetch:NEVER_CALLED", MockResult::Hash("xxx".into()));
+
+    let mut vm = test_vm();
+    vm.set_repo("alpha", repo_with_refs("aaa", "bbb", "ccc"));
+
+    // Only run one op — second expectation unconsumed
+    let _ = vm.run(&mock, vec![
+        Op::bundle_create("alpha"),
+    ]);
+
+    mock.assert_complete(); // panics: 1 unconsumed
+}
+
+#[test]
+#[should_panic(expected = "mismatch")]
+fn strict_mock_panics_on_wrong_order() {
+    let mock = StrictMockBackend::new();
+    mock.expect("ref_write", MockResult::Unit);         // expects write first
+    mock.expect("bundle_create", MockResult::Hash("/tmp/a.bundle".into())); // then create
+
+    let mut vm = test_vm();
+    vm.set_repo("alpha", repo_with_refs("aaa", "bbb", "ccc"));
+
+    // But we call create first — wrong order
+    let _ = vm.run(&mock, vec![
+        Op::bundle_create("alpha"),    // mismatch: expected "ref_write"
+    ]);
+}
+
+#[test]
+fn strict_mock_reconcile_conflict_path() {
+    let mock = StrictMockBackend::new();
+    // Expect exact sequence: merge → conflict → agent → success → bundle
+    mock.expect("merge_trees:target_h+container_h", MockResult::MergeConflict(vec!["shared.txt".into()]));
+    mock.expect("agent_run", MockResult::Hash("resolved_head".into()));
+    mock.expect("bundle_create:gamma", MockResult::Hash("/tmp/g.bundle".into()));
+
+    let mut vm = test_vm();
+    vm.set_repo("gamma", repo_with_refs("container_h", "session_h", "target_h"));
+
+    let result = vm.run(&mock, vec![
+        Op::TryMerge {
+            repo: "gamma".into(),
+            ours: "target_h".into(),
+            theirs: "container_h".into(),
+            on_clean: vec![
+                Op::commit("gamma", "TREE", &["target_h"], "squash"),
+            ],
+            on_conflict: vec![
+                Op::AgentRun {
+                    repo: "gamma".into(),
+                    task: AgentTask::ResolveConflicts { files: vec!["shared.txt".into()] },
+                    context: String::new(),
+                    on_success: vec![
+                        Op::bundle_create("gamma"),
+                    ],
+                    on_failure: vec![],
+                },
+            ],
+            on_error: vec![],
+        },
+    ]);
+
+    assert!(!result.halted);
+    mock.assert_complete(); // exact 3 calls, exact order
+}
