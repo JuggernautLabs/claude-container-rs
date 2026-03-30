@@ -26,6 +26,12 @@ impl fmt::Display for Op {
                 write!(f, "bundle-fetch {}", repo),
             Op::RunContainer { image, .. } =>
                 write!(f, "run-container {}", image),
+            Op::Extract { repo, .. } =>
+                write!(f, "extract {} → host", repo),
+            Op::Inject { repo, branch, .. } =>
+                write!(f, "inject {} ← {}", repo, branch),
+            Op::ForceInject { repo, branch, .. } =>
+                write!(f, "force-inject {} ← {}", repo, branch),
             Op::TryMerge { repo, .. } =>
                 write!(f, "try-merge {}", repo),
             Op::AgentRun { repo, task, .. } =>

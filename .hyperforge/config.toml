@@ -1,0 +1,4 @@
+org = "juggernautlabs"
+forges = ["github"]
+visibility = "public"
+description = "Sync VM for container-based agent sessions"

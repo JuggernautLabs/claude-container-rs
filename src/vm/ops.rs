@@ -44,6 +44,14 @@ pub enum Op {
     /// Run a throwaway container (script, collect output, remove).
     RunContainer { image: String, script: String, mounts: Vec<Mount> },
 
+    // ── High-level sync ops (map to SyncEngine methods) ──
+    /// Extract container → host: bundle + fetch + update session branch.
+    Extract { repo: String, session_branch: String },
+    /// Inject host → container: fetch target branch into container + merge.
+    Inject { repo: String, branch: String },
+    /// Force inject: reset container to match host branch (discard container changes).
+    ForceInject { repo: String, branch: String },
+
     // ── Control ──
     /// User confirmation gate.
     Confirm { message: String },
@@ -125,6 +133,10 @@ pub enum OpResult {
     SessionExited { exit_code: i64 },
     /// User confirmed or declined (from Confirm).
     UserDecision(bool),
+    /// Extract result (commits extracted, new session HEAD).
+    Extracted { commits: u32, new_head: String },
+    /// Inject succeeded.
+    Injected,
     /// No meaningful output (RefWrite, Checkout, etc.).
     Unit,
 }
@@ -214,6 +226,20 @@ impl Op {
 
             Op::BundleFetch { repo, .. } => require_repo(vm, repo, self),
 
+            // High-level sync ops
+            Op::Extract { repo, .. } => {
+                require_repo(vm, repo, self)?;
+                let r = vm.repo(repo).unwrap();
+                if !r.container.is_present() {
+                    Err(precondition_err(self, "no container repo to extract from"))
+                } else {
+                    Ok(())
+                }
+            }
+            Op::Inject { repo, .. } | Op::ForceInject { repo, .. } => {
+                require_repo(vm, repo, self)
+            }
+
             // Compounds delegate to their first op's preconditions
             Op::TryMerge { repo, .. } => require_repo(vm, repo, self),
             Op::AgentRun { repo, .. } => require_repo(vm, repo, self),
@@ -245,6 +271,9 @@ fn precondition_err(op: &Op, reason: &str) -> PreconditionError {
         Op::BundleCreate { .. } => "BundleCreate",
         Op::BundleFetch { .. } => "BundleFetch",
         Op::RunContainer { .. } => "RunContainer",
+        Op::Extract { .. } => "Extract",
+        Op::Inject { .. } => "Inject",
+        Op::ForceInject { .. } => "ForceInject",
         Op::TryMerge { .. } => "TryMerge",
         Op::AgentRun { .. } => "AgentRun",
         Op::InteractiveSession { .. } => "InteractiveSession",
@@ -322,6 +351,22 @@ impl Op {
                 // Caller should re-observe after this op.
                 for (_, repo) in vm.repos.iter_mut() {
                     repo.container = RefState::Absent; // force re-observe
+                }
+            }
+
+            Op::Extract { repo, .. } => {
+                if let OpResult::Extracted { new_head, .. } = result {
+                    if let Some(r) = vm.repo_mut(repo) {
+                        r.session = RefState::At(new_head.clone());
+                    }
+                }
+            }
+
+            Op::Inject { repo, .. } | Op::ForceInject { repo, .. } => {
+                // Container state changed — we don't know the new HEAD without re-observing.
+                // But we know the inject succeeded, so mark container as needing re-observe.
+                if let OpResult::Injected = result {
+                    // Container absorbed target's work — exact HEAD unknown until re-extract
                 }
             }
 

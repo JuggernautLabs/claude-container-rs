@@ -112,10 +112,11 @@ pub fn ops_reconcile_clean(
     target_head: &str,
     target_branch: &str,
 ) -> Vec<Op> {
-    let mut ops = ops_inject(repo, target_branch);
-    ops.extend(ops_extract(repo, session_name));
-    ops.push(ops_merge(repo, session_head, target_head, target_branch, true));
-    ops
+    vec![
+        Op::Inject { repo: repo.into(), branch: target_branch.into() },
+        Op::Extract { repo: repo.into(), session_branch: session_name.into() },
+        ops_merge(repo, session_head, target_head, target_branch, true),
+    ]
 }
 
 /// Reconcile (conflicted): merge into volume → agent → extract + merge.
@@ -142,11 +143,10 @@ git merge FETCH_HEAD --no-commit || true"#,
             repo: repo.into(),
             task: AgentTask::ResolveConflicts { files: conflict_files },
             context: String::new(),
-            on_success: {
-                let mut ops = ops_extract(repo, session_name);
-                ops.push(ops_merge(repo, "RESOLVED_HEAD", target_head, target_branch, true));
-                ops
-            },
+            on_success: vec![
+                Op::Extract { repo: repo.into(), session_branch: session_name.into() },
+                ops_merge(repo, "RESOLVED_HEAD", target_head, target_branch, true),
+            ],
             on_failure: vec![
                 Op::checkout(Side::Container, repo, "HEAD"),
             ],
@@ -165,9 +165,9 @@ pub fn plan_push(vm: &SyncVM) -> Vec<Op> {
         let push = repo_push_action(repo, &vm.target_branch);
         match push {
             PushIntent::Inject => {
-                ops.extend(ops_inject(name, &vm.target_branch));
+                ops.push(Op::Inject { repo: name.clone(), branch: vm.target_branch.clone() });
                 // Re-extract after inject to keep session in sync
-                ops.extend(ops_extract(name, &vm.session_name));
+                ops.push(Op::Extract { repo: name.clone(), session_branch: vm.session_name.clone() });
             }
             PushIntent::Clone => {
                 ops.extend(ops_clone(name));
@@ -188,7 +188,7 @@ pub fn plan_pull(vm: &SyncVM) -> Vec<Op> {
         let pull = repo_pull_action(repo);
         match pull {
             PullIntent::Extract => {
-                extract_ops.extend(ops_extract(name, &vm.session_name));
+                extract_ops.push(Op::Extract { repo: name.clone(), session_branch: vm.session_name.clone() });
                 if let (RefState::At(s), RefState::At(t)) = (&repo.session, &repo.target) {
                     merge_ops.push(ops_merge(name, s, t, &vm.target_branch, true));
                 }
@@ -199,7 +199,7 @@ pub fn plan_pull(vm: &SyncVM) -> Vec<Op> {
                 }
             }
             PullIntent::CloneToHost => {
-                extract_ops.extend(ops_extract(name, &vm.session_name));
+                extract_ops.push(Op::Extract { repo: name.clone(), session_branch: vm.session_name.clone() });
             }
             PullIntent::Reconcile { has_conflicts, conflict_files } => {
                 if has_conflicts {

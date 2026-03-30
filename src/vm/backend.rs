@@ -34,6 +34,13 @@ pub trait VmBackend: Send + Sync {
     async fn bundle_create(&self, session: &str, repo: &str) -> Result<String, VmBackendError>;
     async fn bundle_fetch(&self, repo_path: &Path, bundle_path: &str) -> Result<String, VmBackendError>;
     async fn run_container(&self, image: &str, script: &str, mounts: &[Mount]) -> Result<(i64, String), VmBackendError>;
+
+    // ── High-level sync ops ──
+    async fn extract(&self, session: &str, repo: &str, host_path: &Path, session_branch: &str) -> Result<(u32, String), VmBackendError>;
+    async fn inject(&self, session: &str, repo: &str, host_path: &Path, branch: &str) -> Result<(), VmBackendError>;
+    async fn force_inject(&self, session: &str, repo: &str, host_path: &Path, branch: &str) -> Result<(), VmBackendError>;
+
+    // ── Agent/Human ──
     async fn agent_run(&self, task: &super::AgentTask, context: &str, mounts: &[Mount]) -> Result<(bool, Option<String>, Option<String>), VmBackendError>;
     async fn interactive_session(&self, prompt: Option<&str>, mounts: &[Mount]) -> Result<i64, VmBackendError>;
     async fn prompt_user(&self, message: &str) -> Result<bool, VmBackendError>;
@@ -56,6 +63,9 @@ pub enum RecordedCall {
     BundleCreate { session: String, repo: String },
     BundleFetch { repo_path: PathBuf, bundle_path: String },
     RunContainer { image: String },
+    Extract { session: String, repo: String, host_path: PathBuf, session_branch: String },
+    Inject { session: String, repo: String, host_path: PathBuf, branch: String },
+    ForceInject { session: String, repo: String, host_path: PathBuf, branch: String },
     AgentRun { task_debug: String },
     InteractiveSession { prompt: Option<String> },
     PromptUser { message: String },
@@ -89,6 +99,9 @@ pub enum CallMatcher {
     BundleCreate,
     BundleFetch,
     RunContainer,
+    Extract,
+    Inject,
+    ForceInject,
     AgentRun,
     InteractiveSession,
     PromptUser,
@@ -108,6 +121,9 @@ impl CallMatcher {
             (CallMatcher::BundleCreate, RecordedCall::BundleCreate { .. }) |
             (CallMatcher::BundleFetch, RecordedCall::BundleFetch { .. }) |
             (CallMatcher::RunContainer, RecordedCall::RunContainer { .. }) |
+            (CallMatcher::Extract, RecordedCall::Extract { .. }) |
+            (CallMatcher::Inject, RecordedCall::Inject { .. }) |
+            (CallMatcher::ForceInject, RecordedCall::ForceInject { .. }) |
             (CallMatcher::AgentRun, RecordedCall::AgentRun { .. }) |
             (CallMatcher::InteractiveSession, RecordedCall::InteractiveSession { .. }) |
             (CallMatcher::PromptUser, RecordedCall::PromptUser { .. })
@@ -278,6 +294,31 @@ impl VmBackend for MockBackend {
             Some(MockResult::ContainerOutput(code, out)) => Ok((code, out)),
             Some(MockResult::Error(e)) => Err(VmBackendError::Failed(e)),
             _ => Ok((0, String::new())),
+        }
+    }
+
+    async fn extract(&self, session: &str, repo: &str, host_path: &Path, session_branch: &str) -> Result<(u32, String), VmBackendError> {
+        let call = RecordedCall::Extract { session: session.into(), repo: repo.into(), host_path: host_path.into(), session_branch: session_branch.into() };
+        match self.dispatch(call) {
+            Some(MockResult::Hash(h)) => Ok((1, h)),
+            Some(MockResult::Error(e)) => Err(VmBackendError::Failed(e)),
+            _ => Ok((1, "mock_extracted_head".into())),
+        }
+    }
+
+    async fn inject(&self, session: &str, repo: &str, host_path: &Path, branch: &str) -> Result<(), VmBackendError> {
+        let call = RecordedCall::Inject { session: session.into(), repo: repo.into(), host_path: host_path.into(), branch: branch.into() };
+        match self.dispatch(call) {
+            Some(MockResult::Error(e)) => Err(VmBackendError::Failed(e)),
+            _ => Ok(()),
+        }
+    }
+
+    async fn force_inject(&self, session: &str, repo: &str, host_path: &Path, branch: &str) -> Result<(), VmBackendError> {
+        let call = RecordedCall::ForceInject { session: session.into(), repo: repo.into(), host_path: host_path.into(), branch: branch.into() };
+        match self.dispatch(call) {
+            Some(MockResult::Error(e)) => Err(VmBackendError::Failed(e)),
+            _ => Ok(()),
         }
     }
 

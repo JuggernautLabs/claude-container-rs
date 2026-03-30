@@ -988,6 +988,9 @@ async fn git2_docker_ops_return_errors() {
     assert!(backend.bundle_create("session", "repo").await.is_err());
     assert!(backend.bundle_fetch(Path::new("/tmp"), "/tmp/b").await.is_err());
     assert!(backend.run_container("img", "script", &[]).await.is_err());
+    assert!(backend.extract("session", "repo", Path::new("/tmp"), "session-branch").await.is_err());
+    assert!(backend.inject("session", "repo", Path::new("/tmp"), "main").await.is_err());
+    assert!(backend.force_inject("session", "repo", Path::new("/tmp"), "main").await.is_err());
     assert!(backend.agent_run(&AgentTask::Work, "", &[]).await.is_err());
     assert!(backend.interactive_session(None, &[]).await.is_err());
     // prompt_user auto-confirms in Git2Backend
@@ -1010,9 +1013,9 @@ async fn plan_push_injects_when_target_differs() {
 
     let ops = plan_push(&vm);
     assert!(!ops.is_empty(), "should have inject ops");
-    // Should contain a RunContainer (inject) and extract ops (re-extract)
-    assert!(ops.iter().any(|op| matches!(op, Op::RunContainer { .. })));
-    assert!(ops.iter().any(|op| matches!(op, Op::BundleCreate { .. })));
+    // Should contain an Inject and an Extract (re-extract after inject)
+    assert!(ops.iter().any(|op| matches!(op, Op::Inject { .. })));
+    assert!(ops.iter().any(|op| matches!(op, Op::Extract { .. })));
 }
 
 #[tokio::test]
@@ -1043,6 +1046,7 @@ async fn plan_push_skips_host_dirty() {
 
     let ops = plan_push(&vm);
     assert!(!ops.is_empty(), "host dirty should not block push");
+    assert!(ops.iter().any(|op| matches!(op, Op::Inject { .. })));
 }
 
 #[tokio::test]
@@ -1056,7 +1060,7 @@ async fn plan_pull_extracts_when_container_ahead() {
     ));
 
     let ops = plan_pull(&vm);
-    assert!(ops.iter().any(|op| matches!(op, Op::BundleCreate { .. })), "should extract");
+    assert!(ops.iter().any(|op| matches!(op, Op::Extract { .. })), "should extract");
 }
 
 #[tokio::test]
@@ -1114,12 +1118,12 @@ async fn plan_sync_push_before_pull() {
     ));
 
     let ops = plan_sync(&vm);
-    // Find first RunContainer (inject/push) and first BundleCreate (extract/pull)
-    let first_run = ops.iter().position(|op| matches!(op, Op::RunContainer { .. }));
-    let first_bundle = ops.iter().position(|op| matches!(op, Op::BundleCreate { .. }));
+    // Find first Inject (push) and first Extract (pull)
+    let first_inject = ops.iter().position(|op| matches!(op, Op::Inject { .. }));
+    let first_extract = ops.iter().position(|op| matches!(op, Op::Extract { .. }));
 
-    // If both exist, push (RunContainer) should come before pull (BundleCreate)
-    if let (Some(push_idx), Some(pull_idx)) = (first_run, first_bundle) {
+    // If both exist, push (Inject) should come before pull (Extract)
+    if let (Some(push_idx), Some(pull_idx)) = (first_inject, first_extract) {
         assert!(push_idx < pull_idx, "push ops should come before pull ops in sync");
     }
 }

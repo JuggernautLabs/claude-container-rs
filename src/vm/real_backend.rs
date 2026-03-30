@@ -167,6 +167,24 @@ impl VmBackend for RealBackend {
         Err(VmBackendError::Failed("run_container requires async runtime (not yet wired)".into()))
     }
 
+    async fn extract(&self, _session: &str, repo: &str, host_path: &Path, session_branch: &str) -> Result<(u32, String), VmBackendError> {
+        let result = self.engine.extract(&self.session, repo, host_path, session_branch).await
+            .map_err(|e| VmBackendError::Failed(format!("extract: {}", e)))?;
+        Ok((result.commit_count, result.new_head.to_string()))
+    }
+
+    async fn inject(&self, _session: &str, repo: &str, host_path: &Path, branch: &str) -> Result<(), VmBackendError> {
+        self.engine.inject(&self.session, repo, host_path, branch).await
+            .map_err(|e| VmBackendError::Failed(format!("inject: {}", e)))?;
+        Ok(())
+    }
+
+    async fn force_inject(&self, _session: &str, _repo: &str, _host_path: &Path, _branch: &str) -> Result<(), VmBackendError> {
+        // force_inject is private on SyncEngine — not yet wired.
+        // When needed, SyncEngine.force_inject should be made pub.
+        Err(VmBackendError::Failed("force_inject not yet wired (SyncEngine method is private)".into()))
+    }
+
     async fn agent_run(&self, _task: &AgentTask, _context: &str, _mounts: &[Mount]) -> Result<(bool, Option<String>, Option<String>), VmBackendError> {
         Err(VmBackendError::Failed("agent_run requires async runtime (not yet wired)".into()))
     }

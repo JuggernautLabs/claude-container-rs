@@ -1,6 +1,5 @@
 //! Interpreter — walks an op tree, dispatches to backend, updates VM state.
 
-use std::path::Path;
 use super::state::*;
 use super::ops::*;
 use super::backend::*;
@@ -276,6 +275,21 @@ async fn dispatch_primitive<B: VmBackend>(
         Op::RunContainer { image, script, mounts } => {
             let (exit_code, stdout) = backend.run_container(image, script, mounts).await?;
             Ok(OpResult::ContainerOutput { exit_code, stdout })
+        }
+        Op::Extract { repo, session_branch } => {
+            let host_path = repo_path(vm, repo);
+            let (commits, new_head) = backend.extract(&vm.session_name, repo, &host_path, session_branch).await?;
+            Ok(OpResult::Extracted { commits, new_head })
+        }
+        Op::Inject { repo, branch } => {
+            let host_path = repo_path(vm, repo);
+            backend.inject(&vm.session_name, repo, &host_path, branch).await?;
+            Ok(OpResult::Injected)
+        }
+        Op::ForceInject { repo, branch } => {
+            let host_path = repo_path(vm, repo);
+            backend.force_inject(&vm.session_name, repo, &host_path, branch).await?;
+            Ok(OpResult::Injected)
         }
         _ => Ok(OpResult::Unit),
     }

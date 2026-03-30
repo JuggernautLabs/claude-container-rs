@@ -166,6 +166,15 @@ impl VmBackend for Git2Backend {
     async fn run_container(&self, _image: &str, _script: &str, _mounts: &[Mount]) -> Result<(i64, String), VmBackendError> {
         Err(VmBackendError::Failed("run_container requires Docker".into()))
     }
+    async fn extract(&self, _session: &str, _repo: &str, _host_path: &Path, _session_branch: &str) -> Result<(u32, String), VmBackendError> {
+        Err(VmBackendError::Failed("extract requires Docker".into()))
+    }
+    async fn inject(&self, _session: &str, _repo: &str, _host_path: &Path, _branch: &str) -> Result<(), VmBackendError> {
+        Err(VmBackendError::Failed("inject requires Docker".into()))
+    }
+    async fn force_inject(&self, _session: &str, _repo: &str, _host_path: &Path, _branch: &str) -> Result<(), VmBackendError> {
+        Err(VmBackendError::Failed("force_inject requires Docker".into()))
+    }
     async fn agent_run(&self, _task: &AgentTask, _context: &str, _mounts: &[Mount]) -> Result<(bool, Option<String>, Option<String>), VmBackendError> {
         Err(VmBackendError::Failed("agent_run requires Docker".into()))
     }
