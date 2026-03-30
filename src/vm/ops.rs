@@ -1,12 +1,19 @@
-//! Ops — the 12 primitive operations + pre/postconditions.
+//! Ops — primitives + compound ops with success/failure paths.
 //!
-//! Each op is a typed state transition: (RepoVM, Input) → (RepoVM, Output).
-//! Preconditions are checked against VM state before dispatch.
-//! Postconditions update VM state from the backend result.
+//! Primitives are irreducible git/docker/control operations.
+//! Compounds carry their own branching and cleanup — no external
+//! if/else needed. The interpreter walks the tree recursively.
+//!
+//! Design philosophy: agents and humans are first-class ops,
+//! not special cases. Every op that can fail carries its cleanup.
 
 use super::state::*;
 
-/// The 12 irreducible operations.
+// ============================================================================
+// Primitives — the 12 irreducible operations
+// ============================================================================
+
+/// An operation in the sync VM.
 #[derive(Debug, Clone)]
 pub enum Op {
     // ── Ref ops ──
@@ -23,7 +30,7 @@ pub enum Op {
     /// In-memory merge of two trees (no side effects).
     MergeTrees { repo: String, ours: String, theirs: String },
     /// Update worktree to match a ref.
-    Checkout { repo: String, ref_name: String },
+    Checkout { side: Side, repo: String, ref_name: String },
     /// Create a commit object.
     Commit { repo: String, tree: String, parents: Vec<String>, message: String },
 
@@ -36,12 +43,55 @@ pub enum Op {
     // ── Container ops ──
     /// Run a throwaway container (script, collect output, remove).
     RunContainer { image: String, script: String, mounts: Vec<Mount> },
-    /// Attach to an interactive container (agent session).
-    AttachContainer { image: String, env: Vec<(String, String)>, mounts: Vec<Mount> },
 
     // ── Control ──
     /// User confirmation gate.
     Confirm { message: String },
+
+    // ============================================================================
+    // Compound ops — carry success/failure/cleanup paths
+    // ============================================================================
+
+    /// Try a merge. Branch on the result.
+    /// The interpreter runs MergeTrees, then follows the appropriate path.
+    TryMerge {
+        repo: String,
+        ours: String,
+        theirs: String,
+        on_clean: Vec<Op>,
+        on_conflict: Vec<Op>,
+        on_error: Vec<Op>,
+    },
+
+    /// Run an agent (Claude) with a specific task.
+    /// Agent signals completion via `fin`. VM reads structured result.
+    AgentRun {
+        repo: String,
+        task: AgentTask,
+        context: String,
+        on_success: Vec<Op>,
+        on_failure: Vec<Op>,
+    },
+
+    /// Drop a human into the environment.
+    /// On exit, state is unknown — must re-observe.
+    InteractiveSession {
+        prompt: Option<String>,
+        on_exit: Vec<Op>,
+    },
+}
+
+/// What an agent is asked to do.
+#[derive(Debug, Clone)]
+pub enum AgentTask {
+    /// Resolve merge conflicts (markers in worktree).
+    ResolveConflicts { files: Vec<String> },
+    /// General work session.
+    Work,
+    /// Headless run — non-interactive, output captured.
+    Run { prompt: String },
+    /// Review session — read-only.
+    Review { prompt: String },
 }
 
 /// Mount specification for container ops.
@@ -52,7 +102,11 @@ pub struct Mount {
     pub read_only: bool,
 }
 
-/// Result of executing an op.
+// ============================================================================
+// Results
+// ============================================================================
+
+/// Result of executing a primitive op.
 #[derive(Debug, Clone)]
 pub enum OpResult {
     /// A hash value (from RefRead, BundleFetch, Commit).
@@ -63,11 +117,13 @@ pub enum OpResult {
     Ancestry(AncestryResult),
     /// Merge result (from MergeTrees).
     MergeResult { clean: bool, tree: Option<String>, conflicts: Vec<String> },
-    /// Container output.
+    /// Container output (from RunContainer).
     ContainerOutput { exit_code: i64, stdout: String },
-    /// Container exited (AttachContainer).
-    ContainerExited { exit_code: i64 },
-    /// User confirmed or declined.
+    /// Agent completed (from AgentRun).
+    AgentCompleted { resolved: bool, description: Option<String>, new_head: Option<String> },
+    /// Human exited (from InteractiveSession).
+    SessionExited { exit_code: i64 },
+    /// User confirmed or declined (from Confirm).
     UserDecision(bool),
     /// No meaningful output (RefWrite, Checkout, etc.).
     Unit,
@@ -82,6 +138,10 @@ pub enum AncestryResult {
     Diverged { a_ahead: u32, b_ahead: u32, merge_base: Option<String> },
     Unknown,
 }
+
+// ============================================================================
+// Precondition / postcondition errors
+// ============================================================================
 
 /// Precondition error — op cannot execute in current state.
 #[derive(Debug, Clone)]
@@ -98,119 +158,107 @@ impl std::fmt::Display for PreconditionError {
 
 impl std::error::Error for PreconditionError {}
 
+// ============================================================================
+// Preconditions — checked before dispatch
+// ============================================================================
+
 impl Op {
-    /// Check whether this op can execute against the current repo state.
-    /// Returns Ok(()) if preconditions are met, Err with reason if not.
+    /// Check whether this op can execute against the current VM state.
     pub fn check_preconditions(&self, vm: &SyncVM) -> Result<(), PreconditionError> {
         match self {
+            // Read ops: repo must exist in VM
             Op::RefRead { repo, .. } | Op::TreeCompare { repo, .. } |
-            Op::AncestryCheck { repo, .. } => {
-                // Read ops: repo must exist in VM
-                if !vm.repos.contains_key(repo) {
-                    return Err(PreconditionError {
-                        op: format!("{:?}", self),
-                        reason: format!("repo '{}' not in VM state", repo),
-                    });
-                }
-                Ok(())
+            Op::AncestryCheck { repo, .. } | Op::MergeTrees { repo, .. } => {
+                require_repo(vm, repo, self)
             }
 
             Op::RefWrite { side, repo, .. } => {
-                let r = vm.repos.get(repo).ok_or_else(|| PreconditionError {
-                    op: format!("{:?}", self),
-                    reason: format!("repo '{}' not in VM state", repo),
-                })?;
+                require_repo(vm, repo, self)?;
+                let r = vm.repo(repo).unwrap();
                 match side {
-                    Side::Container => {
-                        if !r.container_clean {
-                            return Err(PreconditionError {
-                                op: "RefWrite(container)".into(),
-                                reason: "container is dirty".into(),
-                            });
-                        }
-                    }
-                    Side::Host => {
-                        if !r.host_clean {
-                            return Err(PreconditionError {
-                                op: "RefWrite(host)".into(),
-                                reason: "host is dirty".into(),
-                            });
-                        }
-                    }
+                    Side::Container if !r.container_clean =>
+                        Err(precondition_err(self, "container is dirty")),
+                    _ => Ok(()),
                 }
-                Ok(())
             }
 
-            Op::Checkout { repo, .. } => {
-                let r = vm.repos.get(repo).ok_or_else(|| PreconditionError {
-                    op: "Checkout".into(),
-                    reason: format!("repo '{}' not in VM state", repo),
-                })?;
-                if r.host_merge_state != HostMergeState::Clean {
-                    return Err(PreconditionError {
-                        op: "Checkout".into(),
-                        reason: "host has merge in progress".into(),
-                    });
+            Op::Checkout { side, repo, .. } => {
+                require_repo(vm, repo, self)?;
+                let r = vm.repo(repo).unwrap();
+                match side {
+                    Side::Host if r.host_merge_state != HostMergeState::Clean =>
+                        Err(precondition_err(self, "host has merge in progress")),
+                    _ => Ok(()),
                 }
-                Ok(())
-            }
-
-            Op::MergeTrees { repo, .. } => {
-                // Pure operation — just needs the repo to exist
-                if !vm.repos.contains_key(repo) {
-                    return Err(PreconditionError {
-                        op: "MergeTrees".into(),
-                        reason: format!("repo '{}' not in VM state", repo),
-                    });
-                }
-                Ok(())
             }
 
             Op::Commit { repo, .. } => {
-                let r = vm.repos.get(repo).ok_or_else(|| PreconditionError {
-                    op: "Commit".into(),
-                    reason: format!("repo '{}' not in VM state", repo),
-                })?;
+                require_repo(vm, repo, self)?;
+                let r = vm.repo(repo).unwrap();
                 if r.host_merge_state == HostMergeState::Conflicted {
-                    return Err(PreconditionError {
-                        op: "Commit".into(),
-                        reason: "host has unresolved conflicts".into(),
-                    });
+                    Err(precondition_err(self, "host has unresolved conflicts"))
+                } else {
+                    Ok(())
                 }
-                Ok(())
             }
 
             Op::BundleCreate { repo } => {
-                let r = vm.repos.get(repo).ok_or_else(|| PreconditionError {
-                    op: "BundleCreate".into(),
-                    reason: format!("repo '{}' not in VM state", repo),
-                })?;
+                require_repo(vm, repo, self)?;
+                let r = vm.repo(repo).unwrap();
                 if !r.container.is_present() {
-                    return Err(PreconditionError {
-                        op: "BundleCreate".into(),
-                        reason: "container has no repo".into(),
-                    });
+                    Err(precondition_err(self, "no container repo"))
+                } else {
+                    Ok(())
                 }
-                Ok(())
             }
 
-            Op::BundleFetch { repo, .. } => {
-                if !vm.repos.contains_key(repo) {
-                    return Err(PreconditionError {
-                        op: "BundleFetch".into(),
-                        reason: format!("repo '{}' not in VM state", repo),
-                    });
-                }
-                Ok(())
-            }
+            Op::BundleFetch { repo, .. } => require_repo(vm, repo, self),
 
-            // Container and control ops have no VM preconditions
-            Op::RunContainer { .. } | Op::AttachContainer { .. } | Op::Confirm { .. } => Ok(()),
+            // Compounds delegate to their first op's preconditions
+            Op::TryMerge { repo, .. } => require_repo(vm, repo, self),
+            Op::AgentRun { repo, .. } => require_repo(vm, repo, self),
+
+            // No VM preconditions
+            Op::RunContainer { .. } | Op::Confirm { .. } |
+            Op::InteractiveSession { .. } => Ok(()),
         }
     }
+}
 
-    /// Apply postconditions: update VM state from the op result.
-    /// Called after the backend successfully executes the op.
+fn require_repo(vm: &SyncVM, repo: &str, op: &Op) -> Result<(), PreconditionError> {
+    if vm.repos.contains_key(repo) {
+        Ok(())
+    } else {
+        Err(precondition_err(op, &format!("repo '{}' not in VM state", repo)))
+    }
+}
+
+fn precondition_err(op: &Op, reason: &str) -> PreconditionError {
+    let op_name = match op {
+        Op::RefRead { .. } => "RefRead",
+        Op::RefWrite { .. } => "RefWrite",
+        Op::TreeCompare { .. } => "TreeCompare",
+        Op::AncestryCheck { .. } => "AncestryCheck",
+        Op::MergeTrees { .. } => "MergeTrees",
+        Op::Checkout { .. } => "Checkout",
+        Op::Commit { .. } => "Commit",
+        Op::BundleCreate { .. } => "BundleCreate",
+        Op::BundleFetch { .. } => "BundleFetch",
+        Op::RunContainer { .. } => "RunContainer",
+        Op::TryMerge { .. } => "TryMerge",
+        Op::AgentRun { .. } => "AgentRun",
+        Op::InteractiveSession { .. } => "InteractiveSession",
+        Op::Confirm { .. } => "Confirm",
+    };
+    PreconditionError { op: op_name.to_string(), reason: reason.to_string() }
+}
+
+// ============================================================================
+// Postconditions — update VM state from result
+// ============================================================================
+
+impl Op {
+    /// Update VM state after successful execution.
     pub fn apply_postconditions(&self, vm: &mut SyncVM, result: &OpResult) {
         let session_name = vm.session_name.clone();
         match self {
@@ -231,7 +279,6 @@ impl Op {
             }
 
             Op::BundleFetch { repo, .. } => {
-                // After fetch, the session branch is updated
                 if let OpResult::Hash(hash) = result {
                     if let Some(r) = vm.repo_mut(repo) {
                         r.session = RefState::At(hash.clone());
@@ -239,9 +286,12 @@ impl Op {
                 }
             }
 
-            Op::Checkout { repo, .. } => {
+            Op::Checkout { side, repo, .. } => {
                 if let Some(r) = vm.repo_mut(repo) {
-                    r.host_merge_state = HostMergeState::Clean;
+                    match side {
+                        Side::Host => r.host_merge_state = HostMergeState::Clean,
+                        Side::Container => r.conflict = ConflictState::Clean,
+                    }
                 }
             }
 
@@ -254,15 +304,65 @@ impl Op {
                 }
             }
 
-            Op::RunContainer { .. } => {
-                // Container ops may change container state — the caller
-                // should re-observe after significant container mutations.
+            Op::AgentRun { repo, .. } => {
+                if let OpResult::AgentCompleted { resolved, new_head, .. } = result {
+                    if let Some(r) = vm.repo_mut(repo) {
+                        if *resolved {
+                            r.conflict = ConflictState::Resolved;
+                            if let Some(hash) = new_head {
+                                r.container = RefState::At(hash.clone());
+                            }
+                        }
+                    }
+                }
             }
 
-            // Read-only ops don't change state
+            Op::InteractiveSession { .. } => {
+                // Human was in the container — all state is unknown.
+                // Caller should re-observe after this op.
+                for (_, repo) in vm.repos.iter_mut() {
+                    repo.container = RefState::Absent; // force re-observe
+                }
+            }
+
+            // Read-only or container ops don't change tracked state
             Op::RefRead { .. } | Op::TreeCompare { .. } | Op::AncestryCheck { .. } |
             Op::MergeTrees { .. } | Op::BundleCreate { .. } |
-            Op::AttachContainer { .. } | Op::Confirm { .. } => {}
+            Op::RunContainer { .. } | Op::Confirm { .. } |
+            Op::TryMerge { .. } => {}
         }
+    }
+}
+
+// ============================================================================
+// Builder helpers — convenience constructors for common ops
+// ============================================================================
+
+impl Op {
+    pub fn ref_read(side: Side, repo: &str, ref_name: &str) -> Self {
+        Op::RefRead { side, repo: repo.into(), ref_name: ref_name.into() }
+    }
+    pub fn ref_write(side: Side, repo: &str, ref_name: &str, hash: &str) -> Self {
+        Op::RefWrite { side, repo: repo.into(), ref_name: ref_name.into(), hash: hash.into() }
+    }
+    pub fn checkout(side: Side, repo: &str, ref_name: &str) -> Self {
+        Op::Checkout { side, repo: repo.into(), ref_name: ref_name.into() }
+    }
+    pub fn commit(repo: &str, tree: &str, parents: &[&str], msg: &str) -> Self {
+        Op::Commit {
+            repo: repo.into(),
+            tree: tree.into(),
+            parents: parents.iter().map(|s| s.to_string()).collect(),
+            message: msg.into(),
+        }
+    }
+    pub fn bundle_create(repo: &str) -> Self {
+        Op::BundleCreate { repo: repo.into() }
+    }
+    pub fn bundle_fetch(repo: &str, path: &str) -> Self {
+        Op::BundleFetch { repo: repo.into(), bundle_path: path.into() }
+    }
+    pub fn confirm(msg: &str) -> Self {
+        Op::Confirm { message: msg.into() }
     }
 }

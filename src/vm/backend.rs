@@ -46,7 +46,15 @@ pub trait VmBackend: Send + Sync {
 
     // ── Container ops ──
     fn run_container(&self, image: &str, script: &str, mounts: &[Mount]) -> Result<(i64, String), VmBackendError>;
-    fn attach_container(&self, image: &str, env: &[(String, String)], mounts: &[Mount]) -> Result<i64, VmBackendError>;
+
+    // ── Agent/Human ops ──
+    /// Run an agent (Claude) with a specific task. Returns whether the agent
+    /// resolved the task, an optional description, and the new container HEAD.
+    fn agent_run(&self, task: &super::AgentTask, context: &str, mounts: &[Mount])
+        -> Result<(bool, Option<String>, Option<String>), VmBackendError>;
+    /// Drop a human into an interactive session. Returns exit code.
+    fn interactive_session(&self, prompt: Option<&str>, mounts: &[Mount])
+        -> Result<i64, VmBackendError>;
 
     // ── Control ──
     fn prompt_user(&self, message: &str) -> Result<bool, VmBackendError>;
@@ -225,8 +233,21 @@ impl VmBackend for MockBackend {
         }
     }
 
-    fn attach_container(&self, _image: &str, _env: &[(String, String)], _mounts: &[Mount]) -> Result<i64, VmBackendError> {
-        let call = "attach_container".to_string();
+    fn agent_run(&self, task: &super::AgentTask, _context: &str, _mounts: &[Mount])
+        -> Result<(bool, Option<String>, Option<String>), VmBackendError> {
+        let call = format!("agent_run:{:?}", task);
+        self.record(&call);
+        match self.pop_response(&call) {
+            Some(MockResult::Hash(h)) => Ok((true, Some("resolved".into()), Some(h))),
+            Some(MockResult::Bool(false)) => Ok((false, None, None)),
+            Some(MockResult::Error(e)) => Err(VmBackendError::Failed(e)),
+            _ => Ok((true, Some("mock resolved".into()), Some("mock_agent_head".into()))),
+        }
+    }
+
+    fn interactive_session(&self, prompt: Option<&str>, _mounts: &[Mount])
+        -> Result<i64, VmBackendError> {
+        let call = format!("interactive_session:{}", prompt.unwrap_or("none"));
         self.record(&call);
         match self.pop_response(&call) {
             Some(MockResult::ContainerExited(code)) => Ok(code),
