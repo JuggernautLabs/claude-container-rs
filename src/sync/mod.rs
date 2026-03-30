@@ -44,6 +44,41 @@ fn rand_suffix() -> String {
     format!("{:x}{:x}", t.as_nanos() % 0xFFFFFFFF, c)
 }
 
+/// Wait for a container to exit, with Podman fallback.
+/// Podman sometimes errors on wait when the container exits before wait attaches.
+/// Falls back to inspect to get the exit code.
+async fn wait_for_container(docker: &Docker, container_name: &str) -> Result<i64, bollard::errors::Error> {
+    let mut wait_stream = docker.wait_container(
+        container_name,
+        None::<WaitContainerOptions<String>>,
+    );
+    while let Some(result) = wait_stream.next().await {
+        match result {
+            Ok(resp) => return Ok(resp.status_code),
+            Err(e) => {
+                // Podman fallback: container may have already exited
+                if let Ok(info) = docker.inspect_container(container_name, None).await {
+                    if let Some(state) = &info.state {
+                        if let Some(code) = state.exit_code {
+                            return Ok(code);
+                        }
+                    }
+                }
+                return Err(e);
+            }
+        }
+    }
+    // Stream ended without result — try inspect
+    if let Ok(info) = docker.inspect_container(container_name, None).await {
+        if let Some(state) = &info.state {
+            if let Some(code) = state.exit_code {
+                return Ok(code);
+            }
+        }
+    }
+    Ok(-1) // unknown
+}
+
 /// Shell script injected into the scanner container.
 /// Outputs lines: `name|head|dirty|merging|gitsize`
 const SCAN_SCRIPT: &str = r#"
@@ -114,13 +149,17 @@ impl SyncEngine {
             .await?;
 
         // Wait for exit
-        let mut wait_stream = self
-            .docker
-            .wait_container(&container_name, None::<WaitContainerOptions<String>>);
-        while let Some(result) = wait_stream.next().await {
-            // We just need to consume the stream; exit code checked implicitly
-            let _ = result?;
-        }
+        let exit_code = match wait_for_container(&self.docker, &container_name).await {
+            Ok(code) => code,
+            Err(e) => {
+                let _ = self.docker.remove_container(
+                    &container_name,
+                    Some(RemoveContainerOptions { force: true, ..Default::default() }),
+                ).await;
+                return Err(ContainerError::Docker(e));
+            }
+        };
+        let _ = exit_code; // snapshot doesn't check exit code explicitly
 
         // Collect stdout logs
         let mut log_stream = self.docker.logs(
@@ -667,21 +706,16 @@ echo "BUNDLE_OK"
             .await?;
 
         // Wait for exit
-        let mut wait_stream = self
-            .docker
-            .wait_container(&container_name, None::<WaitContainerOptions<String>>);
-        let mut exit_code: i64 = -1;
-        while let Some(result) = wait_stream.next().await {
-            match result {
-                Ok(resp) => {
-                    exit_code = resp.status_code;
-                }
-                Err(bollard::errors::Error::DockerContainerWaitError { code, .. }) => {
-                    exit_code = code;
-                }
-                Err(_) => {}
+        let exit_code = match wait_for_container(&self.docker, &container_name).await {
+            Ok(code) => code,
+            Err(e) => {
+                let _ = self.docker.remove_container(
+                    &container_name,
+                    Some(RemoveContainerOptions { force: true, ..Default::default() }),
+                ).await;
+                return Err(ContainerError::Docker(e));
             }
-        }
+        };
 
         // Collect logs for diagnostics
         let mut log_output = String::new();
@@ -1162,20 +1196,17 @@ echo "Cloned $(git rev-parse --short HEAD) on $(git symbolic-ref --short HEAD 2>
             .start_container(&container_name, None::<StartContainerOptions<String>>)
             .await?;
 
-        // Wait for exit (handle DockerContainerWaitError as exit code)
-        let mut wait_stream = self
-            .docker
-            .wait_container(&container_name, None::<WaitContainerOptions<String>>);
-        let mut exit_code: i64 = -1;
-        while let Some(result) = wait_stream.next().await {
-            match result {
-                Ok(resp) => exit_code = resp.status_code,
-                Err(bollard::errors::Error::DockerContainerWaitError { code, .. }) => {
-                    exit_code = code;
-                }
-                Err(_) => {}
+        // Wait for exit
+        let exit_code = match wait_for_container(&self.docker, &container_name).await {
+            Ok(code) => code,
+            Err(e) => {
+                let _ = self.docker.remove_container(
+                    &container_name,
+                    Some(RemoveContainerOptions { force: true, ..Default::default() }),
+                ).await;
+                return Err(ContainerError::Docker(e));
             }
-        }
+        };
 
         // Collect logs
         let mut log_output = String::new();
@@ -1246,8 +1277,7 @@ echo "Cloned $(git rev-parse --short HEAD) on $(git symbolic-ref --short HEAD 2>
         self.docker.create_container(Some(opts), config).await?;
         self.docker.start_container(&container_name, None::<StartContainerOptions<String>>).await?;
 
-        let mut wait = self.docker.wait_container(&container_name, None::<WaitContainerOptions<String>>);
-        while let Some(_) = wait.next().await {}
+        let _ = wait_for_container(&self.docker, &container_name).await;
 
         let _ = self.docker.remove_container(
             &container_name,
@@ -1321,24 +1351,16 @@ git remote remove _cc_upstream 2>/dev/null
             .await?;
 
         // Wait for exit
-        let mut wait_stream = self
-            .docker
-            .wait_container(&container_name, None::<WaitContainerOptions<String>>);
-        let mut exit_code: i64 = -1;
-        while let Some(result) = wait_stream.next().await {
-            match result {
-                Ok(resp) => {
-                    exit_code = resp.status_code;
-                }
-                Err(e) => {
-                    let _ = self.docker.remove_container(
-                        &container_name,
-                        Some(RemoveContainerOptions { force: true, ..Default::default() }),
-                    ).await;
-                    return Err(ContainerError::Docker(e));
-                }
+        let exit_code = match wait_for_container(&self.docker, &container_name).await {
+            Ok(code) => code,
+            Err(e) => {
+                let _ = self.docker.remove_container(
+                    &container_name,
+                    Some(RemoveContainerOptions { force: true, ..Default::default() }),
+                ).await;
+                return Err(ContainerError::Docker(e));
             }
-        }
+        };
 
         // Collect logs for diagnostics
         let mut log_output = String::new();
@@ -1458,24 +1480,19 @@ git remote remove _cc_upstream 2>/dev/null
             };
         }
 
-        let mut wait_stream = self.docker
-            .wait_container(&container_name, None::<WaitContainerOptions<String>>);
-        let mut exit_code: i64 = -1;
-        while let Some(result) = wait_stream.next().await {
-            match result {
-                Ok(resp) => { exit_code = resp.status_code; }
-                Err(e) => {
-                    let _ = self.docker.remove_container(
-                        &container_name,
-                        Some(RemoveContainerOptions { force: true, ..Default::default() }),
-                    ).await;
-                    return RepoSyncResult::Failed {
-                        repo_name: repo_name.to_string(),
-                        error: format!("force-inject: {}", e),
-                    };
-                }
+        let exit_code = match wait_for_container(&self.docker, &container_name).await {
+            Ok(code) => code,
+            Err(e) => {
+                let _ = self.docker.remove_container(
+                    &container_name,
+                    Some(RemoveContainerOptions { force: true, ..Default::default() }),
+                ).await;
+                return RepoSyncResult::Failed {
+                    repo_name: repo_name.to_string(),
+                    error: format!("force-inject: {}", e),
+                };
             }
-        }
+        };
 
         let _ = self.docker.remove_container(
             &container_name,
@@ -1574,14 +1591,7 @@ fi
         self.docker.start_container(&container_name, None::<StartContainerOptions<String>>).await?;
 
         // Wait
-        let mut wait_stream = self.docker.wait_container(&container_name, None::<WaitContainerOptions<String>>);
-        while let Some(result) = wait_stream.next().await {
-            match result {
-                Ok(_) => {}
-                Err(bollard::errors::Error::DockerContainerWaitError { .. }) => {}
-                Err(_) => {}
-            }
-        }
+        let _ = wait_for_container(&self.docker, &container_name).await;
 
         // Collect output
         let mut stdout = String::new();
